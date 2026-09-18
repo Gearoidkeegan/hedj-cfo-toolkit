@@ -1,0 +1,28 @@
+{
+  "name": "Hedj",
+  "colours": {
+    "primary": "#1DB88D",
+    "accent": "#FFC000",
+    "ink": "#1F2A37",
+    "muted": "#6B7280",
+    "red": "#E5484D",
+    "amber": "#FFC000",
+    "green": "#1DB88D",
+    "light": "#E8F7F2",
+    "white": "#FFFFFF"
+  },
+  "fonts": {
+    "heading": "Georgia",
+    "body": "Calibri",
+    "figures": "Calibri",
+    "fallback": "Arial"
+  },
+  "footer_text": "Prepared with the Hedj CFO Toolkit · hedj.eu",
+  "chart_series": [
+    "#1DB88D",
+    "#1F2A37",
+    "#FFC000",
+    "#7C6AED",
+    "#E5484D"
+  ]
+}

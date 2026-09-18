@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "cfo-toolkit",
+  "description": "Free treasury tools for CFOs and treasury managers, from Hedj",
+  "owner": {"name": "Hedj Financial Services Ltd"},
+  "plugins": [
+    {
+      "name": "cfo-toolkit",
+      "description": "Free treasury tools for CFOs and treasury managers: policy review, payments and fraud checks, debt advisory, key terms register and cash forecasting.",
+      "version": "0.1.0",
+      "source": "./"
+    }
+  ]
+}

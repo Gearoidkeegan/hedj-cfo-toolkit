@@ -1,0 +1,4 @@
+Facility Name,Lender,Type,Currency,Total Commitment,Drawn Amount,Rate Type,Fixed Rate (% p.a.),Reference Rate,Margin (bps),Start Date,Maturity Date,Amortisation,Secured,Interest Frequency,First Payment Date,Day Count,Notes
+Term Loan A,Brennwald Landesbank,term_loan,EUR,40000000,40000000,floating,,EUR-EURIBOR,150,15/03/2024,15/03/2029,amortising,true,quarterly,15/06/2024,"""ACT/360""",Amortising term loan secured against Bavarian manufacturing assets; funded the machinery upgrade programme.
+RCF,Kestrelmark Bank AG,rcf,EUR,25000000,8000000,floating,,EUR-EURIBOR,175,01/06/2023,01/06/2028,revolving,true,quarterly,01/09/2023,"""ACT/360""",Revolving credit facility for working capital; drawn to fund seasonal inventory build.
+Equipment Finance,Aurach Leasing GmbH,asset_finance,EUR,6000000,4200000,fixed,3.85,,,01/09/2025,01/09/2030,amortising,true,quarterly,01/09/2026,"""ACT/365""","Asset finance for CNC machining centres; fixed rate, secured on the financed equipment."

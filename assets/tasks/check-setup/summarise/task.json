@@ -1,0 +1,10 @@
+{
+  "id": "check-setup.summarise",
+  "version": 1,
+  "tier": "haiku",
+  "depths": ["quick", "full"],
+  "group": "main",
+  "inputs": [{"name": "document", "required": true, "max_tokens": 3000}],
+  "quote_checks": [{"path": "facts[].quote", "input": "document"}],
+  "max_output_tokens": 800
+}

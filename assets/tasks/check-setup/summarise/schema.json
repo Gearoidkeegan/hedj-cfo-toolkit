@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "required": ["summary", "facts"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": {"type": "string", "minLength": 1, "maxLength": 300},
+    "facts": {
+      "type": "array", "minItems": 1, "maxItems": 3,
+      "items": {
+        "type": "object", "required": ["fact", "quote"], "additionalProperties": false,
+        "properties": {
+          "fact": {"type": "string", "minLength": 1, "maxLength": 200},
+          "quote": {"type": "string", "minLength": 1, "maxLength": 120}
+        }
+      }
+    }
+  }
+}
