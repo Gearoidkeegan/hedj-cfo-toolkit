@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "required": ["supplier_id", "reason"],
+  "additionalProperties": false,
+  "properties": {
+    "supplier_id": {"type": ["string", "null"], "maxLength": 80},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 300}
+  }
+}

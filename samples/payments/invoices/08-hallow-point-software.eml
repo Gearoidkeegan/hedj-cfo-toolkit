@@ -1,0 +1,36 @@
+From: Accounts <accounts@hallowpointsoftware.com>
+To: Accounts Payable <ap@larkspurcomponentsltd.example>
+Subject: Invoice HPS-118820 from Hallow Point Software Inc
+Date: Sat, 01 Aug 2026 09:00:00 +0100
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+INVOICE
+
+Hallow Point Software Inc
+500 Ridgeline Parkway, Suite 900
+Austin, TX 78701
+United States
+
+Bill to:
+Larkspur Components Ltd
+Unit 14 Foundry Lane
+Sheffield
+S9 2QR
+United Kingdom
+
+Invoice number: HPS-118820
+Invoice date: 2026-08-01
+Due date: 2026-08-31
+Terms: Net 30
+
+Description: Annual seat renewal, monthly billing
+Net amount: USD 1200.00
+VAT: USD 0.00
+Total due: USD 1200.00
+
+Payment details:
+Bank: Cattleman's Mercantile Bank
+Account number: 4471002238
+BIC/SWIFT: CTMBUS33

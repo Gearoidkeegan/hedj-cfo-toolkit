@@ -1,0 +1,13 @@
+{
+  "id": "payments.fraud-judgement",
+  "version": 1,
+  "tier": "sonnet",
+  "depths": ["quick", "full"],
+  "group": "fraud",
+  "inputs": [
+    {"name": "flags", "required": true, "max_tokens": 20000},
+    {"name": "batch_summary", "required": true, "max_tokens": 2000}
+  ],
+  "quote_checks": [],
+  "max_output_tokens": 6000
+}

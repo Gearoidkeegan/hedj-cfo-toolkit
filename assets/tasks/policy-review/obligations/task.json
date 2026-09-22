@@ -1,0 +1,15 @@
+{
+  "id": "policy-review.obligations",
+  "version": 5,
+  "tier": "sonnet",
+  "depths": ["quick", "full"],
+  "group": "obligations",
+  "inputs": [{"name": "facility", "required": true, "max_tokens": 8000}],
+  "quote_checks": [
+    {"path": "hedging_requirements[].quote", "input": "facility"},
+    {"path": "covenants[].quote", "input": "facility"},
+    {"path": "reporting_duties[].quote", "input": "facility"},
+    {"path": "restrictions[].quote", "input": "facility"}
+  ],
+  "max_output_tokens": 3000
+}

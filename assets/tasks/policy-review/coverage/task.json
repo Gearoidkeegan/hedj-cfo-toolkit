@@ -1,0 +1,17 @@
+{
+  "id": "policy-review.coverage",
+  "version": 2,
+  "tier": "sonnet",
+  "depths": ["quick", "full"],
+  "group": "coverage",
+  "inputs": [
+    {"name": "policy_batch", "required": true, "max_tokens": 6000},
+    {"name": "clause_list", "required": true, "max_tokens": 3000}
+  ],
+  "quote_checks": [
+    {"path": "results[].quote", "input": "policy_batch"},
+    {"path": "parameters[].quote", "input": "policy_batch"},
+    {"path": "instruments[].quote", "input": "policy_batch"}
+  ],
+  "max_output_tokens": 5000
+}

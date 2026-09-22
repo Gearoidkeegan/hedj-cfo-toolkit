@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "required": ["results", "parameters", "instruments"],
+  "additionalProperties": false,
+  "properties": {
+    "results": {
+      "type": "array", "minItems": 1, "maxItems": 80,
+      "items": {
+        "type": "object",
+        "required": ["clause_id", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "clause_id": {"type": "string", "minLength": 1, "maxLength": 80},
+          "status": {"type": "string", "enum": ["covered", "partial", "missing"]},
+          "quote": {"type": "string", "maxLength": 400},
+          "source": {"type": "string", "maxLength": 120},
+          "detail": {"type": "string", "maxLength": 300}
+        }
+      }
+    },
+    "parameters": {
+      "type": "array", "maxItems": 40,
+      "items": {
+        "type": "object",
+        "required": ["parameter_id", "value", "quote", "source"],
+        "additionalProperties": false,
+        "properties": {
+          "parameter_id": {"type": "string", "minLength": 1, "maxLength": 80},
+          "value": {"type": "string", "minLength": 1, "maxLength": 120},
+          "quote": {"type": "string", "minLength": 1, "maxLength": 400},
+          "source": {"type": "string", "maxLength": 120}
+        }
+      }
+    },
+    "instruments": {
+      "type": "array", "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": ["clause_id", "instrument", "quote", "source"],
+        "additionalProperties": false,
+        "properties": {
+          "clause_id": {"type": "string", "minLength": 1, "maxLength": 80},
+          "instrument": {"type": "string", "minLength": 1, "maxLength": 80},
+          "quote": {"type": "string", "minLength": 1, "maxLength": 400},
+          "source": {"type": "string", "maxLength": 120}
+        }
+      }
+    }
+  }
+}

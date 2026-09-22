@@ -1,0 +1,10 @@
+{
+  "id": "policy-review.review-lender",
+  "version": 1,
+  "tier": "sonnet",
+  "depths": ["quick", "full"],
+  "group": "panel",
+  "inputs": [{"name": "review", "required": true, "max_tokens": 24000}],
+  "quote_checks": [],
+  "max_output_tokens": 1600
+}

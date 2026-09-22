@@ -1,0 +1,10 @@
+{
+  "id": "policy-review.critic",
+  "version": 1,
+  "tier": "opus",
+  "depths": ["full"],
+  "group": "panel",
+  "inputs": [{"name": "critique", "required": true, "max_tokens": 32000}],
+  "quote_checks": [],
+  "max_output_tokens": 2000
+}

@@ -17,10 +17,23 @@ from cfo.console import ToolkitError
 from cfo.documents.markdown import parse_front_matter, parse_md, runs
 from cfo.io import save_via_temp
 
+# All three templates share one page geometry (18/15/15/14 mm), so every
+# document the toolkit produces sits on the same page. `report` and `policy`
+# were 30/25/22/20 until Gearoid asked for narrower margins and chose the
+# one-pager's own setup for all of them.
+#
+# `chars_per_line` and `lines_per_page` are not decoration: `build_docx`
+# estimates the page count from them, and that estimate drives the
+# one-pager's "should fit on one page" warning and the policy's own length.
+# They are scaled from the geometry at each template's body size, so widening
+# the text block without moving them would have quietly made every page
+# estimate wrong -- a lite policy promised as four to five pages is measured
+# with these numbers.
+_SHARED_MARGINS_MM = (18, 15, 15, 14)
 TEMPLATES = {
-    "report": {"margins_mm": (30, 25, 22, 20), "body_pt": 10.5, "chars_per_line": 87, "lines_per_page": 46},
-    "policy": {"margins_mm": (30, 25, 22, 20), "body_pt": 10.5, "chars_per_line": 87, "lines_per_page": 46},
-    "onepager": {"margins_mm": (18, 15, 15, 14), "body_pt": 9.5, "chars_per_line": 112, "lines_per_page": 60},
+    "report": {"margins_mm": _SHARED_MARGINS_MM, "body_pt": 10.5, "chars_per_line": 99, "lines_per_page": 48},
+    "policy": {"margins_mm": _SHARED_MARGINS_MM, "body_pt": 10.5, "chars_per_line": 99, "lines_per_page": 48},
+    "onepager": {"margins_mm": _SHARED_MARGINS_MM, "body_pt": 9.5, "chars_per_line": 112, "lines_per_page": 60},
 }
 # Hairline between table rows: the same grey the workbook builder uses.
 HAIRLINE = "D1D5DB"
@@ -46,13 +59,19 @@ def _font(style, name, size=None, colour=None, bold=None):
         style.font.bold = bold
 
 
-def _setup(doc, brand, settings):
+def _setup(doc, brand, settings, style=None):
     section = doc.sections[0]
-    section.page_width, section.page_height = Mm(210), Mm(297)
+    page = (style.page_mm if style is not None and style.page_mm else (210, 297))
+    section.page_width, section.page_height = Mm(page[0]), Mm(page[1])
     left, right, top, bottom = settings["margins_mm"]
     section.left_margin, section.right_margin = Mm(left), Mm(right)
     section.top_margin, section.bottom_margin = Mm(top), Mm(bottom)
-    colours, fonts = brand["colours"], brand["fonts"]
+    colours, fonts = brand["colours"], dict(brand["fonts"])
+    heading_colour = None
+    if style is not None:
+        fonts["body"] = style.body_font or fonts["body"]
+        fonts["heading"] = style.heading_font or fonts["heading"]
+        heading_colour = style.heading_colour
     _font(doc.styles["Normal"], fonts["body"], settings["body_pt"], colours["ink"])
     body = doc.styles["Normal"].paragraph_format
     body.space_after, body.widow_control = Pt(6), True
@@ -61,9 +80,11 @@ def _setup(doc, brand, settings):
     _font(doc.styles["Subtitle"], fonts["heading"], 13, colours["muted"])
     for level, size, before, after in ((1, 16, 18, 6), (2, 13, 14, 4), (3, 11.5, 12, 3)):
         _font(doc.styles[f"Heading {level}"], fonts["heading"], size,
-              colours["primary"] if level == 1 else colours["ink"], True)
+              heading_colour if heading_colour is not None else
+              (colours["primary"] if level == 1 else colours["ink"]), True)
         fmt = doc.styles[f"Heading {level}"].paragraph_format
         fmt.space_before, fmt.space_after, fmt.keep_with_next = Pt(before), Pt(after), True
+    return page
 
 
 def _field(paragraph, instruction):
@@ -107,7 +128,13 @@ def _title_block(doc, meta, brand):
         doc.add_paragraph(str(meta["title"]), style="Title")
     if meta.get("subtitle"):
         doc.add_paragraph(str(meta["subtitle"]), style="Subtitle")
-    line = " · ".join(str(meta[k]) for k in ("company", "date") if meta.get(k))
+    # A document with no subtitle renders exactly as it always has: the
+    # company and the date, on the line below the title. A document that
+    # gives it a subtitle (cfo.policy.cli._meta puts the company name there)
+    # is one that also carries its own version, so that line becomes the
+    # version and the date instead -- the company already sits above it.
+    keys = ("version", "date") if meta.get("subtitle") else ("company", "date")
+    line = " · ".join(str(meta[k]) for k in keys if meta.get(k))
     if line:
         run = doc.add_paragraph().add_run(line)
         run.font.color.rgb = _rgb(brand["colours"]["muted"])
@@ -256,10 +283,10 @@ POLICY_FIELDS = (("version", "Version"), ("owner", "Policy owner"), ("approved_b
                  ("approved_on", "Approval date"), ("next_review", "Next review"))
 
 
-def _policy_front(doc, meta, brand, warnings=None):
+def _policy_front(doc, meta, brand, usable_mm, warnings=None):
     rows = [["Document control", ""]] + [[label, str(meta.get(key, "To be confirmed"))]
                                          for key, label in POLICY_FIELDS]
-    _table(doc, rows, brand, 120, warnings)
+    _table(doc, rows, brand, usable_mm, warnings)
     doc.add_paragraph()
 
 
@@ -363,7 +390,22 @@ def _save(doc, out_path):
     save_via_temp(out_path, doc.save, suffix=".docx")
 
 
-def build_docx(md_text, out_path, template=None, base_dir=None, brand=None):
+def build_docx(md_text, out_path, template=None, base_dir=None, brand=None, style=None,
+               page_budget=None):
+    """`style` is a StyleProfile (`cfo.documents.style_profile`) read from a
+    company's own document. When given, the document is built with its
+    fonts, sizes, margins, page size, heading colour and heading numbering in
+    place of the template's, falling back to the template's own choice for
+    whatever the profile could not read; the default `style=None` is exactly
+    today's behaviour, byte for byte.
+
+    `page_budget` is the number of pages a caller is prepared to accept,
+    independent of `template`. Left as the default `None`, the only page
+    check is the onepager template's own "should fit on one page" warning --
+    unchanged from before this keyword existed, so every caller that does
+    not pass it gets byte-identical output. Given a budget, that becomes the
+    check instead: at or under budget, no warning; over budget, a warning
+    naming the budget."""
     brand = brand or load_brand()
     md_text, removed_chars = xmlsafe.clean(md_text)
     meta, body = parse_front_matter(md_text)
@@ -371,18 +413,24 @@ def build_docx(md_text, out_path, template=None, base_dir=None, brand=None):
     if template not in TEMPLATES:
         raise ToolkitError(("template", f"must be one of {', '.join(TEMPLATES)}"))
     settings = TEMPLATES[template]
+    if style is not None:
+        from cfo.documents.style_profile import StyleProfile, as_settings
+        if not isinstance(style, StyleProfile):
+            raise ToolkitError(("style", f"must be a StyleProfile or None, not {type(style).__name__}"))
+        settings = as_settings(style, settings)
     blocks = parse_md(body)
     doc = Document()
     warnings = []
     if removed_chars:
         warnings.append(("document", f"removed {removed_chars} character(s) that Word cannot store"))
-    _setup(doc, brand, settings)
+    page = _setup(doc, brand, settings, style)
+    usable_mm = page[0] - settings["margins_mm"][0] - settings["margins_mm"][1]
     _header_footer(doc, meta, brand)
     _title_block(doc, meta, brand)
     if template == "policy":
-        _policy_front(doc, meta, brand, warnings)
-        _number_headings(doc, brand)
-    usable_mm = 210 - settings["margins_mm"][0] - settings["margins_mm"][1]
+        _policy_front(doc, meta, brand, usable_mm, warnings)
+        if style is None or style.numbered_headings is not False:
+            _number_headings(doc, brand)
     root = os.path.realpath(base_dir or os.getcwd())
     list_state = {}
     for block in blocks:
@@ -419,7 +467,11 @@ def build_docx(md_text, out_path, template=None, base_dir=None, brand=None):
         elif kind == "hr":
             _rule(doc, brand)
     pages = estimate_pages(blocks, settings, meta)
-    if template == "onepager" and pages > 1:
+    if page_budget is not None:
+        if pages > page_budget:
+            warnings.append(("document",
+                             f"estimated {pages} pages; the budget for this document is {page_budget}"))
+    elif template == "onepager" and pages > 1:
         warnings.append(("document", f"estimated {pages} pages; a one-pager should fit on one page"))
     _save(doc, out_path)
     return {"document": os.path.abspath(out_path), "template": template, "pages_estimate": pages,

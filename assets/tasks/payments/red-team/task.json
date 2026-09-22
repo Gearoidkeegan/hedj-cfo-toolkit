@@ -1,0 +1,14 @@
+{
+  "id": "payments.red-team",
+  "version": 1,
+  "tier": "sonnet",
+  "depths": ["quick", "full"],
+  "group": "red_team",
+  "inputs": [
+    {"name": "controls", "required": true, "max_tokens": 8000}
+  ],
+  "quote_checks": [
+    {"path": "routes[].control_quote", "input": "controls"}
+  ],
+  "max_output_tokens": 4000
+}

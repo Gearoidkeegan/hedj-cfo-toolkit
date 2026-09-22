@@ -8,7 +8,7 @@ from cfo.paths import asset
 from cfo.profile import conditions, store
 from cfo.profile.schema import FIELDS, coerce, get_path
 
-TYPES = ("choice", "multi", "select", "bool", "number", "text", "currency_list", "rank")
+TYPES = ("choice", "multi", "select", "bool", "number", "text", "currency_list", "text_list", "rank")
 MAX_HEADER = 12
 SKIP_SOURCES = ("answered", "extracted", "derived")
 

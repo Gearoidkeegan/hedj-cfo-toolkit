@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "required": ["judgements"],
+  "additionalProperties": false,
+  "properties": {
+    "judgements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "where", "matters", "why"],
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "type": "string",
+            "enum": ["changed_bank_details", "new_payee_large_amount", "lookalike_supplier_name",
+                     "lookalike_sender_domain", "iban_country_mismatch",
+                     "sequential_invoice_numbers", "just_under_a_limit", "split_to_stay_under",
+                     "round_sum", "odd_timing", "near_duplicate_invoice", "hidden_instructions"]
+          },
+          "where": {"type": "string", "minLength": 1, "maxLength": 200},
+          "matters": {"type": "boolean"},
+          "why": {"type": "string", "minLength": 1, "maxLength": 600},
+          "group": {"type": "string", "maxLength": 120}
+        }
+      }
+    }
+  }
+}

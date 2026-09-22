@@ -26,6 +26,8 @@ from cfo.tasks import accept as _accept  # noqa: E402
 from cfo import extract as _extract  # noqa: E402
 from cfo.profile import questions as _questions  # noqa: E402
 from cfo.profile import store as _store  # noqa: E402
+from cfo.policy import cli as _policy  # noqa: E402
+from cfo.payments import cli as _payments  # noqa: E402
 
 # cfo.workbook, cfo.documents.docx_build and cfo.documents.deck_build pull in
 # openpyxl / python-docx / python-pptx at import time. They are imported
@@ -267,6 +269,99 @@ def add_profile_commands(groups):
             p.add_argument("--for-task", action="store_true")
 
 
+def add_policy_commands(groups):
+    policy = groups.add_parser("policy", help="treasury and hedging policy review")
+    sub = policy.add_subparsers(dest="command", required=True, parser_class=_Parser)
+    for name in ("recommend", "start", "coverage-input", "coverage-collect", "coverage-merge",
+                 "obligations-input", "obligations-collect", "obligations-merge",
+                 "findings", "panel-input", "panel-merge", "build"):
+        p = sub.add_parser(name)
+        p.add_argument("--run", required=True)
+        if name == "start":
+            p.add_argument("--scope", required=True)
+            p.add_argument("--tier", required=True)
+        if name == "coverage-input":
+            p.add_argument("--doc", required=True)
+        if name == "obligations-input":
+            p.add_argument("--docs", nargs="+", required=True)
+        if name == "panel-input":
+            p.add_argument("--viewpoint", required=True)
+        if name == "build":
+            p.add_argument("--outputs")
+            p.add_argument("--style", choices=["standard", "match"], default="standard")
+        p.set_defaults(func=_policy.dispatch, policy_command=name)
+
+
+def add_payments_commands(groups):
+    payments = groups.add_parser("payments", help="payments and fraud checking")
+    sub = payments.add_subparsers(dest="command", required=True, parser_class=_Parser)
+
+    p = sub.add_parser("start", help="extract invoices, load the master and matrix")
+    p.add_argument("--run", required=True)
+    p.add_argument("--invoices", required=True)
+    p.add_argument("--master")
+    p.add_argument("--matrix")
+    p.add_argument("--debtor-account", default="")
+    p.add_argument("--debtor-name", default="")
+    p.add_argument("--debtor-bic", default="")
+    p.add_argument("--initiating-party", default="")
+    p.add_argument("--sell-currency", default="")
+    p.add_argument("--execution-date")
+    p.add_argument("--reference-prefix")
+    p.set_defaults(func=_payments.dispatch, payments_command="start")
+
+    for name in ("extract-input", "collect", "check", "review", "judgement-input",
+                "judgement-collect"):
+        p = sub.add_parser(name)
+        p.add_argument("--run", required=True)
+        if name == "review":
+            # B5: the only way back from a review opened over bad or empty
+            # state -- see cfo.payments.cli._reset_empty_review, which
+            # refuses this the moment a disposition or a sign-off actually
+            # exists, so it can never discard a real audit trail.
+            p.add_argument("--reset", action="store_true",
+                           help="discard a review that has no disposition or sign-off "
+                                "recorded yet, and open it again from scratch")
+        p.set_defaults(func=_payments.dispatch, payments_command=name)
+
+    p = sub.add_parser("mark-failed", help="record one invoice as explicitly unresolvable "
+                                           "this run, with a reason")
+    p.add_argument("--run", required=True)
+    p.add_argument("--invoice", required=True, help="the display_file exactly as `payments "
+                                                     "start` or `payments extract-input` "
+                                                     "printed it")
+    p.add_argument("--reason", required=True)
+    p.set_defaults(func=_payments.dispatch, payments_command="mark-failed")
+
+    p = sub.add_parser("disposition", help="record a decision against one exception")
+    p.add_argument("--run", required=True)
+    p.add_argument("--id", required=True)
+    p.add_argument("--accept", action="store_true")
+    p.add_argument("--reject", action="store_true")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--by", required=True)
+    p.set_defaults(func=_payments.dispatch, payments_command="disposition")
+
+    p = sub.add_parser("sign-off", help="attest the batch has been reviewed")
+    p.add_argument("--run", required=True)
+    p.add_argument("--by", required=True)
+    p.set_defaults(func=_payments.dispatch, payments_command="sign-off")
+
+    p = sub.add_parser("build", help="build the payment file, workbook and report")
+    p.add_argument("--run", required=True)
+    p.add_argument("--outputs")
+    p.add_argument("--debtor-name")
+    p.add_argument("--debtor-bic")
+    p.add_argument("--initiating-party")
+    p.add_argument("--home-currency")
+    p.set_defaults(func=_payments.dispatch, payments_command="build")
+
+    p = sub.add_parser("red-team", help="the adversarial review of the payment controls")
+    p.add_argument("--run", required=True)
+    p.add_argument("--controls")
+    p.set_defaults(func=_payments.dispatch, payments_command="red-team")
+
+
 def build_parser():
     parser = _Parser(prog="toolkit.py", description="CFO Toolkit command line")
     groups = parser.add_subparsers(dest="group", required=True, parser_class=_Parser)
@@ -279,6 +374,8 @@ def build_parser():
     add_doc_commands(groups)
     add_deck_commands(groups)
     add_profile_commands(groups)
+    add_policy_commands(groups)
+    add_payments_commands(groups)
     return parser
 
 

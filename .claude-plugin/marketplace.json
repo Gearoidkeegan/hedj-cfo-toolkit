@@ -7,7 +7,7 @@
     {
       "name": "cfo-toolkit",
       "description": "Free treasury tools for CFOs and treasury managers: policy review, payments and fraud checks, debt advisory, key terms register and cash forecasting.",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "source": "./"
     }
   ]

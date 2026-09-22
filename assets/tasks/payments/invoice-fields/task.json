@@ -1,0 +1,26 @@
+{
+  "id": "payments.invoice-fields",
+  "version": 4,
+  "tier": "haiku",
+  "depths": ["quick", "full"],
+  "group": "invoice_fields",
+  "inputs": [
+    {"name": "invoice", "required": true, "max_tokens": 4000}
+  ],
+  "quote_checks": [
+    {"path": "supplier_name.quote", "input": "invoice"},
+    {"path": "invoice_number.quote", "input": "invoice"},
+    {"path": "invoice_date.quote", "input": "invoice"},
+    {"path": "due_date.quote", "input": "invoice"},
+    {"path": "net.quote", "input": "invoice"},
+    {"path": "vat.quote", "input": "invoice"},
+    {"path": "gross.quote", "input": "invoice"},
+    {"path": "currency.quote", "input": "invoice"},
+    {"path": "payment_reference.quote", "input": "invoice"},
+    {"path": "cost_category.quote", "input": "invoice"},
+    {"path": "contact_email.quote", "input": "invoice"},
+    {"path": "bic.quote", "input": "invoice"},
+    {"path": "vat_number.quote", "input": "invoice"}
+  ],
+  "max_output_tokens": 1400
+}

@@ -33,6 +33,8 @@ FIELDS = {
     "cash.holds_investments": ("bool",), "cash.rated_counterparty_access": ("enum", ACCESS),
     "team.finance_headcount": ("int",), "team.treasury_dedicated": ("bool",),
     "team.board_approves_policy": ("bool",), "team.roles": ("roles",),
+    "controls.payment_approver": ("text",), "controls.bank_change_callback_verified": ("bool",),
+    "controls.dual_release": ("bool",),
     "risk_inputs.exposurePctTurnover": ("enum", tuple(ra.TURNOVER_SCORES)),
     "risk_inputs.contingentRisk": ("bool",),
     "risk_inputs.teamSize": ("enum", tuple(ra.TEAM_SCORES)),

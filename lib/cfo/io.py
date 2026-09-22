@@ -67,6 +67,14 @@ def write_json_atomic(path, data):
     write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
+def write_json_compact_atomic(path, data):
+    """Like `write_json_atomic`, but without the indentation (about 35%
+    smaller): for a file that is itself a model task's input and so counts
+    against that task's token cap (I1) -- the panel and critic inputs -- not
+    for run state, which stays indented for a person to read."""
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+
+
 def read_json(path, default=None):
     if not os.path.exists(path):
         return default

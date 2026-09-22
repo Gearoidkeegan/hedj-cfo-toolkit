@@ -24,12 +24,23 @@ def validate_condition(cond, known_fields=None):
     return problems
 
 
+def _present(value):
+    """A field holds something: not missing, and not an empty list, set, mapping or
+    string. Answering "no currencies" stores an empty list, which must read as no
+    currency exposure rather than as one. A False answer is still an answer."""
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, set, dict, str)):
+        return len(value) > 0
+    return True
+
+
 def _test(item, profile):
     value = get_path(profile, item["field"])
     op = next(key for key in item if key != "field")
     arg = item[op]
     if op == "exists":
-        return (value is not None) == bool(arg)
+        return _present(value) == bool(arg)
     if value is None:
         return False
     if op == "eq":
