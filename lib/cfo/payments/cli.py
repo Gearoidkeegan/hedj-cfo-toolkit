@@ -25,6 +25,19 @@ calls the functions that close them:
    alongside the batch, from the same invoice the payment came from, and
    `cmd_build` passes it to `build_payments_workbook(..., cost_categories=...)`.
 
+**D2/D3 (2026-09-22 real run):** `cmd_check`/`cmd_review` also compare
+every invoice's own `bill_to` (T15, T5 review) against the debtor name the
+run was started with, and against the invoice's own `supplier_name` --
+`_payer_mismatch`/`_supplier_identity_finding`, both built on
+`suppliers.same_party` -- because a real run named Hedj as `--debtor-name`
+while both real invoices were billed to Booterstown United F.C. and the
+tool said nothing, and separately recorded that same customer as the
+*supplier* on an invoice whose real supplier's name lives only inside a
+logo image. Both warn, loudly, and never refuse: a parent company paying a
+subsidiary's invoice, or a sole trader invoicing under a name close to
+their own customer's, are real and legitimate, and this only ever asks a
+person to look, never decides for them.
+
 `payments build` refuses to write `pain001` or `csv` -- an actual payment
 instruction -- before `signoff.is_signed_off` is true. `workbook` and
 `report` may be built earlier, as drafts: `build_payments_workbook` and
@@ -37,19 +50,22 @@ picks a supplier match above `suppliers.match`'s exact/near-exact levels (an
 unmatched name is a `lookalike_supplier_name` candidate, or a gap to report,
 never a guess), and it never invents a limit, a bank detail or a judgement.
 """
+import csv
 import dataclasses
 import datetime
 import email.utils
 import os
 import re
 import tempfile
+import types
 from decimal import Decimal, InvalidOperation
 
 from cfo import extract as extract_mod
 from cfo import runs
 from cfo.console import ToolkitError
-from cfo.io import locked, read_json, sha256_bytes, write_json_atomic
-from cfo.payments import approvals, batch as batch_mod, fraud, model, signoff, suppliers, validate
+from cfo.io import locked, now_iso, read_json, sha256_bytes, write_json_atomic
+from cfo.payments import (amend, approvals, batch as batch_mod, fraud, model, signoff, suppliers,
+                          validate)
 from cfo.payments.extract import invoice_from_output
 from cfo.tasks.prepare import task_work_dir
 
@@ -454,6 +470,70 @@ def _canonical_invoices(run_dir):
     return sorted(invoices, key=lambda inv: inv["filename"])
 
 
+def _payer_mismatch(invoice, debtor_name):
+    """`(where, message)`, or `None` -- D2 (2026-09-22 real run): this
+    invoice's own `bill_to` party against the debtor name the run was
+    started with. A real run named Hedj as `--debtor-name` while both real
+    invoices were billed to Booterstown United F.C.; the run recorded Hedj
+    as the payer and said nothing at all -- no payment file was actually
+    built that time, but on a real run the money would have left the wrong
+    company's account.
+
+    **Warns, never refuses** (the controller's own ruling): a parent
+    company legitimately pays a subsidiary's invoices, and a tool that
+    refused that would be wrong more often than it was right. `None` -- no
+    warning -- for an exact-or-near-exact match (`suppliers.same_party`,
+    reused rather than a second normalisation written here), and `None`
+    just as much when either side is blank: a `bill_to` this invoice never
+    stated is a real, reportable absence in its own right (most invoices
+    will report one until this brand-new field has had a live-model
+    verification run against real samples), not a mismatch to guess at,
+    and a blank debtor name is `payments start`'s own gap, not this
+    invoice's."""
+    bill_to = str(invoice.get("bill_to") or "").strip()
+    debtor_name = str(debtor_name or "").strip()
+    if not bill_to or not debtor_name:
+        return None
+    if suppliers.same_party(bill_to, debtor_name):
+        return None
+    return (_where(invoice),
+            f"this invoice is billed to {bill_to!r}, but this run's own debtor is "
+            f"{debtor_name!r} -- they do not appear to be the same party, and paying it would "
+            "move money from a different company's account unless that is deliberate (a "
+            "parent company paying a subsidiary's invoice, say)")
+
+
+def _supplier_identity_finding(invoice):
+    """`(where, message)`, or `None` -- D3 (2026-09-22 real run): the real
+    defect that recorded Booterstown United F.C. -- the *customer*, off its
+    own `bill_to` line -- as the *supplier* on an invoice whose actual
+    supplier's name appears only inside a logo image, never in the text
+    layer a model is ever shown. This never tries to recover the real
+    name; there is no OCR here, and guessing one would be worse than
+    reporting nothing.
+
+    Two different findings, never both at once for one invoice: no
+    `supplier_name` extracted at all (checked first -- a blank name is the
+    more urgent, more general gap: nothing at all confirms who is being
+    paid, whether or not a `bill_to` exists to compare it against), or a
+    `supplier_name` that names the same party as this invoice's own
+    `bill_to` (`suppliers.same_party`, the same comparison `_payer_mismatch`
+    above uses, reused rather than reinvented). **Warns, never refuses**
+    (a sole trader can legitimately invoice under a name close to their own
+    customer's), and `None` for an ordinary invoice where neither is true."""
+    supplier = str(invoice.get("supplier") or "").strip()
+    if not supplier:
+        return (_where(invoice), "no supplier name could be extracted from this invoice at all; "
+                                 "nothing here has confirmed who is actually being paid")
+    bill_to = str(invoice.get("bill_to") or "").strip()
+    if bill_to and suppliers.same_party(supplier, bill_to):
+        return (_where(invoice),
+                f"the supplier recorded for this invoice ({supplier!r}) is the same party as "
+                f"its own bill-to ({bill_to!r}); the real supplier's name may not have been "
+                "read at all -- see the invoice's own text for where it might actually be")
+    return None
+
+
 def cmd_check(args):
     """Validation (`cfo.payments.validate`, T6) and the twelve fraud checks
     (`cfo.payments.fraud`, T8) over every collected invoice. Nothing here
@@ -516,11 +596,46 @@ def cmd_check(args):
                         "exception so it still gets a disposition") for u in failed_readable]
     result_warnings += [(cid, performed[cid]["reason"]) for cid in not_performed]
     result_warnings += warnings
+    # D2/D3 (2026-09-22 real run): a wrong-payer or wrong-supplier finding
+    # is not a validate.py or fraud.py check (neither reads `bill_to`) and
+    # is not `fraud.checks_performed`'s business either -- folded straight
+    # into `_warnings` here, the same way every other per-invoice finding
+    # in this command already is, so `console.print_problems` shows it
+    # exactly like any other warning, loudly, without a person having to
+    # know a fourth place to look.
+    payer_mismatches = [f for f in (_payer_mismatch(inv, config["debtor_name"])
+                                    for inv in invoices) if f]
+    supplier_identity_findings = [f for f in (_supplier_identity_finding(inv)
+                                              for inv in invoices) if f]
+    result_warnings += payer_mismatches
+    result_warnings += supplier_identity_findings
+    # B1 (was D5, 2026-09-22 real run): both findings above compare a
+    # `bill_to` against something else, so when NO invoice in the batch
+    # states one at all, neither comparison has anything to run against --
+    # the payer check does not run, and without this, the run reports
+    # nothing, which is the exact failure the payer check exists to
+    # prevent, one level up (see this class's own docstring). A per-invoice
+    # blank `bill_to` alongside others that ARE populated is not this: the
+    # check ran, it just had nothing to say about that one invoice.
+    if not any(str(inv.get("bill_to") or "").strip() for inv in invoices):
+        no_bill_to_reason = ("no invoice in this batch stated a bill-to party, so it could not "
+                             "be compared against anything")
+        not_performed = not_performed + ["payer_mismatch", "supplier_identity"]
+        result_warnings += [("payer_mismatch", no_bill_to_reason),
+                            ("supplier_identity", no_bill_to_reason)]
+    # D4 (2026-09-22 real run): money-relevant warnings, so
+    # console.print_problems never truncates them away regardless of how
+    # many ordinary (marked-failed, not-performed) warnings arrived first
+    # -- the payer mismatch and supplier-identity findings above, plus
+    # validate.py's own amount-relevant warnings (an early-settlement
+    # discount, a near-duplicate invoice raising the same amount twice).
+    important_warnings = warnings + payer_mismatches + supplier_identity_findings
     return {"invoices": len(invoices), "missing": missing, "failed": failed_display,
             "errors": len(errors), "warnings": len(warnings),
             "flags": len(flags), "flags_by_check": {cid: sum(f.check == cid for f in flags)
                                                      for cid in fraud.CHECK_IDS},
-            "not_performed": not_performed, "_warnings": result_warnings}
+            "not_performed": not_performed, "_warnings": result_warnings,
+            "_important": important_warnings}
 
 
 # --- cmd_review: build the candidate payment batch, work out exceptions
@@ -635,19 +750,38 @@ def _reset_empty_review(run_dir):
                                 "instead"))
         write_json_atomic(path, None)
     _write_state(run_dir, "exception-meta", None)
+    # B3 (F7): `amendments.json` and `draft.json` are newer than this
+    # function and it never learned about either. Left alone, an
+    # exclusion recorded before this reset stayed excluded after it --
+    # silently, on the authority of a review the reviewer had just
+    # explicitly discarded -- and a stale draft kept pointing a later
+    # sign-off at a document this run no longer stands behind. Cleared
+    # under the exact same guard as everything above: only reachable once
+    # nothing has actually been decided yet.
+    _write_state(run_dir, amend.AMENDMENTS_NAME, None)
+    _write_state(run_dir, "draft", None)
 
 
 def cmd_review(args):
     """Opens sign-off for this run (once; a second call just reports what
     is still outstanding, like `policy panel-merge` re-run). Every fraud
     flag, every unreadable document, every invoice explicitly marked
-    failed and every invoice this run could not resolve bank details for
-    becomes one exception; `signoff.start_review` assigns each an id, and
+    failed, every invoice this run could not resolve bank details for, and
+    (D2/D3, 2026-09-22 real run) every invoice whose bill-to party
+    disagrees with the run's own debtor or with its own recorded supplier
+    becomes one exception; `signoff.start_review`
+    assigns each an id, and
     `exception-meta.json` remembers, per id, enough to act on an
     *accepted* one later (see `cmd_disposition`) -- and, for every kind,
-    the `payment_reference` of the payment it would drop if *rejected*
-    instead (see B1, in `cmd_build`'s own `_filter_rejected_payments`):
-    `None` for a kind that never had a payment to begin with.
+    `payment_references` (a list) naming every payment it would drop if
+    *rejected* instead (see B1, in `amend.instructed_batches`, called
+    from `cmd_build`): `[]` for a kind that never had a payment to begin
+    with, one element for the ordinary single-invoice case, and more
+    than one for a fraud flag that reasons across several invoices at
+    once (D7 -- `fraud.Flag.content_doc_ids`). `payment_reference`
+    (singular) is kept alongside it for a caller with no reason to read
+    a list, but is never a second, independently-set value: it is always
+    `payment_references[0]`, or `None` when the list is empty.
 
     **B5:** refuses to open at all while any readable invoice is neither
     collected nor explicitly marked failed (`payments mark-failed`) --
@@ -732,16 +866,16 @@ def cmd_review(args):
                                           "failed its checksum); it will not be included in "
                                           "this payment run"))
             unresolved_meta.append({"kind": "unresolved_bank_details", "where": where,
-                                    "payment_reference": None})
+                                    "payment_reference": None, "payment_references": []})
 
     # **N1 -- the guard the second review asks for, "whatever you choose":**
     # refuse to open a review, naming the offenders, rather than silently
     # resolve either of the two shapes that made B1's fix reopenable.
     #
     # (a) two payments that literally share a `reference` -- the milder
-    # variant reproduced in the second review: `_filter_rejected_payments`
-    # (cmd_build) matches a rejected exception's payment_reference against
-    # EVERY payment carrying it, so a genuine reference collision drops both
+    # variant reproduced in the second review: `amend.instructed_batches`
+    # (called from cmd_build) matches a rejected exception's payment_reference
+    # against EVERY payment carrying it, so a genuine reference collision drops both
     # if either is ever rejected, silently, no matter how the flag-to-payment
     # mapping above is built. `reference_owners` was collected in the loop
     # above, directly off the payments actually built, never re-derived.
@@ -766,14 +900,16 @@ def cmd_review(args):
     exceptions, meta = [], []
     for where, message in unreadable:
         exceptions.append((where, message))
-        meta.append({"kind": "unreadable", "where": where, "payment_reference": None})
+        meta.append({"kind": "unreadable", "where": where, "payment_reference": None,
+                    "payment_references": []})
 
     for unit in readable:
         if unit["content_doc_id"] in failed and unit["content_doc_id"] not in results:
             where = unit["display_file"]
             exceptions.append((where, f"marked failed: {failed[unit['content_doc_id']]['reason']}"
                                " -- it will not be included in this payment run"))
-            meta.append({"kind": "failed_invoice", "where": where, "payment_reference": None})
+            meta.append({"kind": "failed_invoice", "where": where, "payment_reference": None,
+                        "payment_references": []})
 
     # N1: a validate_error's own `where` is all validate.py ever hands
     # back -- there is no content_doc_id to fall back on the way a flag now
@@ -796,8 +932,9 @@ def cmd_review(args):
                             for where in ambiguous_error_wheres])
     for where, message in errors:
         exceptions.append((where, message))
+        ref = where_to_reference.get(where)
         meta.append({"kind": "validate_error", "where": where,
-                    "payment_reference": where_to_reference.get(where)})
+                    "payment_reference": ref, "payment_references": [ref] if ref else []})
 
     for flag in flags:
         exceptions.append((flag.where, f"[{flag.check}] {flag.summary}"))
@@ -808,17 +945,71 @@ def cmd_review(args):
         # and nothing here needs it back.
         bank_change = ({"field": change["field"], "old": change["old"], "new": change["new"],
                        "supplier_id": change["supplier_id"]} if change else None)
-        # N1: a flag's own payment_reference comes from its content_doc_id,
-        # which is unique to the one invoice that raised it -- never from
-        # `where_to_reference`, which two invoices sharing a number could
-        # collapse to the wrong one (see the module's own docstring and the
-        # second review's N1). A flag built with no content_doc_id at all
-        # (a test fixture, mostly -- see `fraud.Flag`'s own default) simply
-        # gets `None` here, the same honest answer an unresolved invoice
-        # already gets.
+        # D7 (.superpowers/sdd/2026-09-22-payments-staged-output/defect-d-
+        # brief.md): a flag's own payment_references comes from EVERY
+        # content_doc_id it carries -- `flag.content_doc_ids` for a
+        # multi-invoice finding (split_to_stay_under,
+        # near_duplicate_invoice, sequential_invoice_numbers, and
+        # lookalike_sender_domain's own batch-pair comparison), or just
+        # `flag.content_doc_id` alone for the ordinary single-invoice
+        # case -- never from `where_to_reference`, which two invoices
+        # sharing a number could collapse to the wrong one (see the
+        # module's own docstring and the second review's N1). Before this,
+        # a Flag carried only one content_doc_id no matter how many
+        # invoices its own summary named, so a finding about several
+        # invoices could only ever drop one of them, an artefact of
+        # iteration order -- the partial version of B1's own defect,
+        # wearing a hat: rejecting it looked like it worked, because
+        # *one* payment did disappear.
+        #
+        # `payment_references` is the canonical list -- every id that
+        # resolves to an actual payment (a content_doc_id with no
+        # matching payment, e.g. one whose bank details never resolved,
+        # contributes nothing: there is no payment to drop), in order,
+        # with no duplicate. `payment_reference` is never a second,
+        # independently-derived value: it is this same list's own first
+        # entry, or `None` when the list is empty -- one representation,
+        # not two that can disagree. A flag built with no content_doc_id
+        # at all (a test fixture, mostly -- see `fraud.Flag`'s own
+        # default) simply gets an empty list, the same honest answer an
+        # unresolved invoice already gets.
+        doc_ids = flag.content_doc_ids or ((flag.content_doc_id,) if flag.content_doc_id else ())
+        seen_refs, payment_references = set(), []
+        for doc_id in doc_ids:
+            ref = content_doc_id_to_reference.get(doc_id)
+            if ref and ref not in seen_refs:
+                seen_refs.add(ref)
+                payment_references.append(ref)
         meta.append({"kind": "flag", "check": flag.check, "where": flag.where,
                     "bank_change": bank_change,
-                    "payment_reference": content_doc_id_to_reference.get(flag.content_doc_id)})
+                    "payment_reference": payment_references[0] if payment_references else None,
+                    "payment_references": payment_references})
+
+    # D2/D3 (2026-09-22 real run): a wrong-payer or wrong-supplier finding
+    # gets an exception here exactly like every other kind above -- a
+    # disposition and an audit-trail entry, never a silent drop and never
+    # a silent keep either (the controller's own ruling: warn, never
+    # refuse). `payment_reference`/`payment_references` come from
+    # `content_doc_id_to_reference`, the same map a fraud flag's own
+    # exception above uses, so rejecting either of these still drops the
+    # payment it belongs to (B1's own `_filter_rejected_payments`,
+    # unchanged, reads `payment_references` generically and has no
+    # notion of "kind" to special-case here). Both findings are always
+    # single-invoice -- one invoice's own bill-to or supplier identity --
+    # so `payment_references` is always at most one element.
+    for invoice in invoices:
+        reference = content_doc_id_to_reference.get(str(invoice.get("content_doc_id") or ""))
+        refs = [reference] if reference else []
+        payer_finding = _payer_mismatch(invoice, config["debtor_name"])
+        if payer_finding is not None:
+            exceptions.append(payer_finding)
+            meta.append({"kind": "payer_mismatch", "where": payer_finding[0],
+                        "payment_reference": reference, "payment_references": refs})
+        supplier_finding = _supplier_identity_finding(invoice)
+        if supplier_finding is not None:
+            exceptions.append(supplier_finding)
+            meta.append({"kind": "supplier_identity", "where": supplier_finding[0],
+                        "payment_reference": reference, "payment_references": refs})
 
     exceptions += unresolved_exceptions
     meta += unresolved_meta
@@ -879,6 +1070,563 @@ def _deserialize_batches(data):
                                sell_currency=b["sell_currency"],
                                external_reference=b["external_reference"], payments=payments))
     return out
+
+
+# --- cmd_draft: the NOT-REVIEWED workbook, staged as its own named
+# command, and the record `cmd_sign_off` (below) checks a draft against.
+#
+# `_draft_is_current` and the message helpers beneath it are module-level
+# on purpose, not logic buried inside `cmd_sign_off` -- Task 5's `payments
+# final` refuses for these same two reasons and is told to call this
+# helper and reference these constants rather than re-derive either. Two
+# independently typed copies of a sentence drift, and these sentences are
+# the product (global constraint 3: "sign-off attests to a draft the
+# reviewer saw" -- this task is where that becomes true).
+#
+# `cmd_amend` (below) has its own, separate sign-off refusal --
+# `signoff.is_signed_off` alone is what it needs (constraint 3's other
+# half: amending after sign-off is refused outright, there being no
+# draft-staleness question at amend time, only at sign-off time).
+
+_NO_DRAFT_MESSAGE = ("no draft has been produced for this run -- run `payments draft` and "
+                     "look at it first")
+
+# C1/F10: `draft.json` records `path`, but nothing used to stat it -- a
+# draft workbook deleted after review still let sign-off succeed,
+# recording an attestation that points at evidence no longer on disk.
+# Reusing `_NO_DRAFT_MESSAGE` verbatim, plus a sentence naming what is
+# actually missing, rather than a second, differently-worded refusal:
+# from the reviewer's side, "the draft you looked at is gone" and "no
+# draft was ever made" call for the exact same next step (`payments
+# draft`), so they should read as the same problem, not two.
+_DRAFT_FILE_GONE_MESSAGE = (_NO_DRAFT_MESSAGE + " -- the draft workbook this run recorded is "
+                           "gone from disk")
+
+
+def _assert_draft_file_present(where, draft):
+    """Shared by `cmd_sign_off` and `cmd_final` (C1/F10), the same two
+    call sites that already share `_NO_DRAFT_MESSAGE` and
+    `_stale_draft_message` -- see the module comment above `_draft_is_
+    current`. Refuses the moment `draft["path"]` no longer names a real
+    file: recording a sign-off against a workbook that was deleted is a
+    weaker claim than this tool makes for itself everywhere else."""
+    path = draft.get("path")
+    if not path or not os.path.isfile(path):
+        raise ToolkitError((where, _DRAFT_FILE_GONE_MESSAGE))
+
+
+def _stale_draft_message(amendments_since):
+    """The `payments sign-off` refusal text for a stale draft (handed
+    over by Task 2, fixed here as part of Task 3 -- `payments amend`
+    is what makes the mixed case testable at all).
+
+    Staleness itself is decided by `_draft_is_current`'s digest
+    comparison, never by this count -- so a draft can go stale with
+    *zero* amendments recorded (an exception was re-dispositioned
+    instead, which changes `amend.instructed_batches`'s own dropped set
+    with no `amend.record` call anywhere). The old, single template
+    printed "0 amendment(s) since" in exactly that case, which told the
+    reader nothing and read like a bug in the tool rather than a fact
+    about their run. This never prints a zero count: when amendments
+    explain the staleness, it says how many; when they do not (the only
+    other way `_draft_is_current` can go false, today, is a
+    re-disposition or a batches.json that has drifted out from under a
+    recorded amendment -- see `_draft_is_current`'s own C2/F8 fix), it
+    says the payments changed without inventing a number."""
+    if amendments_since > 0:
+        return (f"the payments changed after the draft you are signing: {amendments_since} "
+                "amendment(s) since -- run `payments draft` again")
+    return ("the payments changed after the draft you are signing -- an exception was "
+            "re-dispositioned since, not an amendment -- run `payments draft` again")
+
+
+def _draft_is_current(run_dir):
+    """True only when this run has a draft (`draft.json`, written by
+    `cmd_draft`) AND that draft's own `lines_digest` still matches
+    `amend.lines_digest`'s current answer for this run's own
+    `batches.json` -- i.e. nothing that would change what an instructed
+    payment actually contains (a disposition, an amendment) has happened
+    since the draft was taken. False for a run with no draft at all, or
+    no `batches.json` yet (review never opened). Never raises -- a plain
+    question, safe to ask at any point in the flow, the same way
+    `signoff.is_signed_off` is.
+
+    **C2/F8:** `amend.lines_digest` (via `amend.instructed_batches`)
+    raises `ToolkitError` when a reference either exclusion source
+    believes it dropped cannot actually be found in `batches.json` --
+    e.g. an amendment recorded against a reference a since-rewritten
+    `batches.json` no longer carries. That is caught here and treated as
+    "not current", never re-raised: `cmd_sign_off` and `cmd_final` were
+    both told to call this helper instead of re-deriving the check, on
+    the strength of the docstring sentence above, and a run whose
+    batches no longer contain a reference this run's own records say it
+    dropped is exactly a run whose draft should not be treated as
+    current."""
+    draft = _read_state(run_dir, "draft")
+    if draft is None:
+        return False
+    batches_data = _read_state(run_dir, "batches")
+    if batches_data is None:
+        return False
+    batches = _deserialize_batches(batches_data)
+    try:
+        digest = amend.lines_digest(run_dir, batches)
+    except ToolkitError:
+        return False
+    return draft.get("lines_digest") == digest
+
+
+def cmd_draft(args):
+    """Builds the NOT-REVIEWED workbook -- the exact call `payments build
+    --outputs workbook` makes (`cmd_build`, called here directly with a
+    synthetic `outputs="workbook"` args object, rather than a second
+    workbook builder), same filename, same content, Exceptions sheet and
+    all: a draft showing only payment lines would hide what the reviewer
+    is there to look at (spec criterion 2).
+
+    Records enough in `draft.json` (`_write_state`, at
+    `<run>/payments/draft.json`, like every other state file in this
+    tool -- replaced in full on every call, never appended: a person can
+    run this any number of times, and only the latest matters) for
+    `cmd_sign_off` to tell whether the draft a reviewer looked at is
+    still the thing they would be attesting to: its `lines_digest`
+    (`amend.lines_digest`, over the *instructed* lines -- after both
+    rejected exceptions and amendment exclusions), and the amendment
+    count at the time this draft was taken, so a later staleness check
+    can say how many amendments happened since.
+
+    **F1 (controller finding on Tasks 1-2):** reports *both* the reviewed
+    shape (`signoff.control_block`'s own payment count/control total --
+    what `payments review` originally opened sign-off against, before any
+    exclusion) and the instructed shape (`amend.instructed_batches`'s own
+    count/total -- what will actually be sent), each clearly labelled as
+    `reviewed_*`/`instructed_*`. Before this fix, only the reviewed number
+    was returned while the digest underneath it was already over the
+    instructed lines -- a reviewer who had excluded a payment was told
+    "2 payments, GBP 3,200.00" when only one, GBP 1,200.00, would actually
+    be instructed. Mirrors the workbook's own "Run total" vs "Run total
+    (instructed)" convention (`cfo.payments.workbook._payments_sheet`):
+    report both sides of an exclusion decision, never silently swap one
+    number for the other.
+
+    Refuses once the run is signed off: at that point there is nothing
+    left to draft against -- `payments final` is the command for a
+    signed-off run's real output.
+    """
+    if signoff.is_signed_off(args.run):
+        raise ToolkitError(("draft", "this run is already signed off -- there is nothing "
+                                     "left to draft; run `payments final` instead"))
+
+    workbook_args = types.SimpleNamespace(run=args.run, outputs="workbook", debtor_name=None,
+                                          debtor_bic=None, initiating_party=None,
+                                          home_currency=None)
+    built = cmd_build(workbook_args)
+    path = built["files"]["workbook"]
+
+    batches = _deserialize_batches(_require_state(args.run, "batches", "review"))
+    control = signoff.control_block(args.run)
+    digest = amend.lines_digest(args.run, batches)
+    exceptions_outstanding = len(signoff.outstanding(args.run))
+
+    payment_batches, _dropped_refs = amend.instructed_batches(args.run, batches)
+    instructed_line_count = sum(b.count for b in payment_batches)
+    instructed_control_total = sum((b.control_total for b in payment_batches), Decimal("0"))
+
+    result = {
+        "path": path,
+        "reviewed_line_count": control["payment_count"],
+        "reviewed_control_total": str(control["control_total"]),
+        "instructed_line_count": instructed_line_count,
+        "instructed_control_total": str(instructed_control_total),
+        "exceptions_outstanding": exceptions_outstanding,
+    }
+    # B4 (F11): the plan's own shape for draft.json is `{built_at, path,
+    # line_count, control_total, lines_digest}` -- every field but
+    # `built_at` was written. Without it, nothing can answer "when was
+    # the draft this person signed off actually produced?", the first
+    # question anyone auditing a payment run asks.
+    _write_state(args.run, "draft", dict(result, built_at=now_iso(), lines_digest=digest,
+                                        amendment_count=len(amend.amendments(args.run))))
+    return result
+
+
+# --- cmd_amend: exclude a payment, restore a mistaken exclusion, or
+# rewrite a payment's remittance text -- before sign-off only. Task 3 of
+# the staged-output milestone.
+#
+# `--beneficiary`/`--account`/`--iban`/`--amount` are defined flags that
+# refuse, not undefined flags argparse would reject with an
+# "unrecognized arguments" message that teaches nobody anything (global
+# constraint 2: an amendment never touches the beneficiary, the bank
+# details or the amount -- who gets paid, how much and into which
+# account are exactly what invoice fraud targets, and a sentence typed
+# into a chat window is the weakest authorisation there is).
+
+_AMEND_REFUSED_FLAGS = ("beneficiary", "account", "iban", "amount")
+_AMEND_REFUSAL_MESSAGE = (
+    "Who gets paid, how much, and into which account are the three things invoice "
+    "fraud targets. If one of them is wrong on this payment, the invoice is wrong -- "
+    "correct the invoice and run the batch again."
+)
+
+# --- `--value-date`: the batch-boundary decision. Task 4 of the
+# staged-output milestone. See docs/specs/2026-09-22-payments-staged-
+# output-design.md, "The value date that crosses a batch boundary" -- the
+# authority for the three choices and their effect wording below; do not
+# reword either sentence (the skill reads them out to a reviewer
+# verbatim). Each `effect` string is that section's own "what happens"
+# and "what it costs" cells for one choice, joined into the single field
+# the decision payload's own JSON shape carries -- quoted, not composed.
+
+_VALUE_DATE_DECISION = "value-date-outside-batch"
+
+_KEEP_IN_BATCH_EFFECT = (
+    "The date is recorded on the line; the bank still pays on the batch's execution date. "
+    "The date you typed is not the date it is paid."
+)
+_KEEP_IN_BATCH_UNAVAILABLE_REASON = (
+    "refused outright when the new date is earlier than the execution date, because that "
+    "would be paying late while recording otherwise"
+)
+_OWN_BATCH_EFFECT = (
+    "A second batch dated to the new date, with its own reference and its own pain.001 file. "
+    "One more file for the bank, and the batch count changes, so the review record is "
+    "restated."
+)
+_HOLD_BACK_EFFECT = "Excluded from this run, to be paid separately. It is not paid this run."
+
+
+def _value_date_choices(new_value_date, execution_date):
+    """The three-choice list the decision payload carries, and the list
+    `--resolve <id>` is checked against. `keep-in-batch` is the only one
+    that can be unavailable -- when the new date is *earlier* than the
+    batch's own execution date, recording it would claim a date earlier
+    than the one the bank will actually pay on (`model.validate_batch`
+    already refuses exactly that value_date/execution_date relationship
+    inside a batch). `own-batch` and `hold-back` never depend on the
+    direction of the change: a batch dated to any value date validates on
+    its own, and excluding a payment has no notion of "too early"."""
+    keep_available = new_value_date >= execution_date
+    return [
+        {"id": amend.RESOLUTION_KEEP_IN_BATCH, "effect": _KEEP_IN_BATCH_EFFECT,
+         "available": keep_available,
+         "unavailable_reason": None if keep_available else _KEEP_IN_BATCH_UNAVAILABLE_REASON},
+        {"id": amend.RESOLUTION_OWN_BATCH, "effect": _OWN_BATCH_EFFECT, "available": True,
+         "unavailable_reason": None},
+        {"id": amend.RESOLUTION_HOLD_BACK, "effect": _HOLD_BACK_EFFECT, "available": True,
+         "unavailable_reason": None},
+    ]
+
+
+_VALUE_DATE_RESOLUTIONS = (amend.RESOLUTION_KEEP_IN_BATCH, amend.RESOLUTION_OWN_BATCH,
+                           amend.RESOLUTION_HOLD_BACK)
+
+
+def _payment_field(run_dir, reference, field):
+    """The current value of `field` on the payment named `reference`,
+    read straight from this run's own `batches.json` -- `None` if the
+    reference is not one of this run's own payments. Only ever used to
+    fill in an amendment's own `from_value` for the audit trail; `amend.
+    record` (called separately, always) is what actually refuses an
+    unknown reference, naming it -- this never raises."""
+    data = _read_state(run_dir, "batches", []) or []
+    for batch in data:
+        for payment in batch.get("payments", []):
+            if payment.get("reference") == reference:
+                return payment.get(field)
+    return None
+
+
+def _write_remittance(run_dir, reference, remittance):
+    """The one place `payments amend --remittance` ever writes: rewrites
+    the named payment's own `remittance` field, in place, in this run's
+    `batches.json` -- the same file `cmd_build` reads to emit pain001 and
+    csv. Never touches `reference` (the join key `exception-meta.json`,
+    `dropped_refs` and the draft's own `lines_digest` all rely on -- see
+    `cfo.payments.model.Payment`'s own docstring on the split this task
+    made and why) or any other field on the payment. Locked, the same
+    read-modify-write every other state file in this tool uses, so a
+    concurrent amend on the same run can't interleave and lose one.
+
+    Called only after `amend.record` has already accepted the amendment
+    (see `cmd_amend`): the audit-trail entry is written first, so this
+    call is never the only trace of a change that happened."""
+    path = _state_path(run_dir, "batches")
+    with locked(path):
+        data = read_json(path, []) or []
+        for batch in data:
+            for payment in batch.get("payments", []):
+                if payment.get("reference") == reference:
+                    payment["remittance"] = remittance
+        write_json_atomic(path, data)
+
+
+def _write_value_date(run_dir, reference, value_date):
+    """The one place a `--value-date` amendment that actually applies
+    (the equal-date case, or a `keep-in-batch` resolution) ever writes:
+    rewrites the named payment's own `value_date` field, in place, in
+    this run's `batches.json` -- never the batch's own `execution_date`
+    (that would be the false record `keep-in-batch` exists to avoid), and
+    never any other field on the payment. Locked, the same read-modify-
+    write every other state file in this tool uses -- see
+    `_write_remittance`, which this mirrors."""
+    path = _state_path(run_dir, "batches")
+    with locked(path):
+        data = read_json(path, []) or []
+        for batch in data:
+            for payment in batch.get("payments", []):
+                if payment.get("reference") == reference:
+                    payment["value_date"] = value_date.isoformat()
+        write_json_atomic(path, data)
+
+
+def _locate_payment_batch(batches, reference):
+    """`(batch_index, payment_index)` for the payment named `reference`
+    among `batches` (a list of `model.Batch`, already deserialized) --
+    refused, naming the reference, when none of them carries it. This is
+    a second, independent lookup from `amend.record`'s own refusal (which
+    checks the same `batches.json`, read as plain JSON): `--value-date`
+    needs the actual batch object -- its `execution_date`, to decide
+    whether the new date crosses it -- before it can decide whether to
+    call `amend.record` at all, so it cannot wait for that function's own
+    check to fire."""
+    for batch_index, batch in enumerate(batches):
+        for payment_index, payment in enumerate(batch.payments):
+            if payment.reference == reference:
+                return batch_index, payment_index
+    raise ToolkitError(("--reference", f"{reference!r} is not a payment reference in this "
+                        "run's own batches.json -- run `payments review` first, or check the "
+                        "reference against this run's own outstanding payments"))
+
+
+def _resolve_own_batch(args, batches, batch_index, payment_index, new_value_date):
+    """`own-batch`: a new `Batch` dated to `new_value_date`, holding only
+    the one payment being moved, with its own external reference
+    continuing this run's existing sequence (`batch_mod.
+    next_external_reference` -- never a reference `build_batches` could
+    also have produced, or an earlier `own-batch` call already did: see
+    that function's own docstring on why a collision there would be
+    worse than cosmetic). Run through `model.validate_batch` before it is
+    kept, the same guarantee `build_batches` itself already gives every
+    batch it produces. An emptied source batch (the moved payment was its
+    only one) is dropped from `batches.json` entirely -- the same thing
+    `amend.instructed_batches` already does for its own, filtered view.
+
+    Changes the batch count, so the run's own recorded review shape would
+    disagree with `batches.json` the moment this is written --
+    `signoff.restate` is called last, after the new shape is already on
+    disk, so it recomputes from exactly what a later rebuild would see.
+    (`cmd_amend` has already refused if this run is signed off, before
+    any of this runs -- `restate` also refuses on its own, independently,
+    the one guard that must never be bypassed.)
+    """
+    config = _require_state(args.run, "config", "start")
+    source_batch = batches[batch_index]
+    moved_payment = source_batch.payments[payment_index]
+    remaining_payments = [p for i, p in enumerate(source_batch.payments) if i != payment_index]
+
+    new_external_reference = batch_mod.next_external_reference(batches,
+                                                                config["reference_prefix"])
+    new_batch = model.Batch(debtor_account=source_batch.debtor_account,
+                            execution_date=new_value_date, sell_currency=source_batch.sell_currency,
+                            external_reference=new_external_reference,
+                            payments=[dataclasses.replace(moved_payment,
+                                                          value_date=new_value_date)])
+    problems = model.validate_batch(new_batch)
+    if problems:
+        raise ToolkitError(problems)
+
+    new_batches = list(batches)
+    if remaining_payments:
+        new_batches[batch_index] = dataclasses.replace(source_batch, payments=remaining_payments)
+    else:
+        new_batches.pop(batch_index)  # an emptied source batch is dropped
+    new_batches.append(new_batch)
+
+    entry = amend.record(
+        args.run, reference=moved_payment.reference, change=amend.VALUE_DATE,
+        from_value=moved_payment.value_date.isoformat() if moved_payment.value_date else None,
+        to_value=new_value_date.isoformat(), resolution=amend.RESOLUTION_OWN_BATCH,
+        reason=args.reason, by=args.by)
+    _write_state(args.run, "batches", _serialize_batches(new_batches))
+    restate_reason = (f"payments amend --value-date --resolve own-batch moved "
+                      f"{moved_payment.reference!r} into its own batch "
+                      f"({new_external_reference}, dated {new_value_date.isoformat()}) -- "
+                      f"{args.reason}")
+    signoff.restate(args.run, new_batches, reason=restate_reason, by=args.by)
+    return entry
+
+
+def _amend_value_date(args):
+    """`--value-date <YYYY-MM-DD>`: the one amendment kind that may need to
+    ask a question instead of just recording an answer -- see the module
+    docstring's constraint 3 and docs/specs/2026-09-22-payments-staged-
+    output-design.md, "The value date that crosses a batch boundary".
+
+    Equal to the batch's own `execution_date`: applies and records it like
+    any other amendment, no decision involved.
+
+    Not equal, and `--resolve` was not given: returns the decision payload
+    and writes **nothing at all** -- `amendments.json`, `batches.json` and
+    `draft.json` are untouched. The tool does not pick a default.
+
+    Not equal, `--resolve <id>` given: applies exactly that choice --
+    `keep-in-batch` (refused if unavailable), `own-batch`
+    (`_resolve_own_batch`), or `hold-back` (Task 3's own exclusion path,
+    `resolution` set to name it -- one exclusion path, two sources, per
+    global constraint 1; no second code path is written here for it).
+    """
+    reference = str(args.reference or "").strip()
+    new_value_date = _parse_date(args.value_date)
+    if new_value_date is None:
+        raise ToolkitError(("--value-date", f"{args.value_date!r} is not a valid date -- use "
+                            "YYYY-MM-DD"))
+
+    resolve = str(args.resolve or "").strip() or None
+    if resolve is not None and resolve not in _VALUE_DATE_RESOLUTIONS:
+        raise ToolkitError(("--resolve", f"must be one of {', '.join(_VALUE_DATE_RESOLUTIONS)}, "
+                            f"not {resolve!r}"))
+
+    batches = _deserialize_batches(_require_state(args.run, "batches", "review"))
+    batch_index, payment_index = _locate_payment_batch(batches, reference)
+    batch = batches[batch_index]
+    payment = batch.payments[payment_index]
+    current_value_date = payment.value_date.isoformat() if payment.value_date else None
+
+    if new_value_date == batch.execution_date:
+        entry = amend.record(args.run, reference=reference, change=amend.VALUE_DATE,
+                             from_value=current_value_date, to_value=new_value_date.isoformat(),
+                             resolution=None, reason=args.reason, by=args.by)
+        _write_value_date(args.run, reference, new_value_date)
+        return entry
+
+    choices = _value_date_choices(new_value_date, batch.execution_date)
+
+    if resolve is None:
+        return {"decision_required": _VALUE_DATE_DECISION, "reference": reference,
+               "batch_reference": batch.external_reference,
+               "batch_execution_date": batch.execution_date.isoformat(),
+               "new_value_date": new_value_date.isoformat(), "choices": choices}
+
+    chosen = next(choice for choice in choices if choice["id"] == resolve)
+    if not chosen["available"]:
+        raise ToolkitError(("--resolve", chosen["unavailable_reason"]))
+
+    if resolve == amend.RESOLUTION_KEEP_IN_BATCH:
+        entry = amend.record(args.run, reference=reference, change=amend.VALUE_DATE,
+                             from_value=current_value_date, to_value=new_value_date.isoformat(),
+                             resolution=amend.RESOLUTION_KEEP_IN_BATCH, reason=args.reason,
+                             by=args.by)
+        _write_value_date(args.run, reference, new_value_date)
+        entry = dict(entry)
+        entry["_warnings"] = [(reference, f"recorded with value date "
+                               f"{new_value_date.isoformat()}, but this batch's execution date "
+                               f"is unchanged at {batch.execution_date.isoformat()} -- the bank "
+                               f"will pay this payment on {batch.execution_date.isoformat()}, "
+                               f"not on {new_value_date.isoformat()}")]
+        return entry
+
+    if resolve == amend.RESOLUTION_HOLD_BACK:
+        return amend.record(args.run, reference=reference, change=amend.EXCLUDE,
+                            from_value=None, to_value=None, resolution=amend.RESOLUTION_HOLD_BACK,
+                            reason=args.reason, by=args.by)
+
+    return _resolve_own_batch(args, batches, batch_index, payment_index, new_value_date)
+
+
+def cmd_amend(args):
+    """Records exactly one of `--exclude`, `--restore`, `--remittance` or
+    `--value-date` against one payment reference. `--reason`/`--by` are
+    required always, exactly as `signoff.disposition`/`amend.record`
+    already require them.
+
+    **Refused outright, before anything else:** any of the four flags
+    invoice fraud actually targets (see the module-level comment above),
+    and any amendment once this run is signed off -- constraint 3's other
+    half: amending after sign-off would attest to a draft the reviewer
+    never saw. (Whether the CURRENT draft is stale is a sign-off-time
+    question, answered by `_draft_is_current`/`cmd_sign_off`, not an
+    amend-time one; this only ever asks `signoff.is_signed_off`.)
+
+    **`--exclude`** records the exclusion and nothing else -- it does not
+    itself filter anything (global constraint 1: `amend.instructed_
+    batches`, called from `cmd_build`, is the one place that ever removes
+    a payment from what reaches a bank). The payment is marked in the
+    workbook the same way a rejected exception's payment already is,
+    because both are the same `dropped_references` `cmd_build` already
+    passes to `build_payments_workbook` -- nothing here needs to know
+    that; it falls out of `amend.excluded_references` joining the
+    existing union.
+
+    **`--restore`** is the only thing that un-excludes a reference (Task
+    1's own defect, fixed in `amend.excluded_references`: see amend.py's
+    module docstring). Refused, naming the reference, when it is not
+    currently excluded -- a reviewer who mistypes a reference is told,
+    rather than quietly recording a no-op that reads like an action in
+    the audit trail.
+
+    **`--remittance`** rewrites `batches.json`'s own `remittance` field
+    for that payment (`_write_remittance`), never `reference` -- see
+    `_write_remittance`'s own docstring. `amend.record` is called FIRST
+    (it is what actually refuses an unknown reference, or a blank reason/
+    by, naming what's wrong): the audit-trail entry always exists before
+    the file is touched, never the other way around.
+
+    **`--value-date`** (Task 4) may not apply anything at all -- see
+    `_amend_value_date`. `--resolve <id>` only ever makes sense alongside
+    it, and is refused otherwise (there being no decision it could be
+    resolving).
+    """
+    refused = [name for name in _AMEND_REFUSED_FLAGS if getattr(args, name, None) is not None]
+    if refused:
+        raise ToolkitError([(f"--{name}", _AMEND_REFUSAL_MESSAGE) for name in refused])
+
+    actions = [name for name in ("exclude", "restore") if getattr(args, name, False)]
+    if getattr(args, "remittance", None) is not None:
+        actions.append("remittance")
+    if getattr(args, "value_date", None) is not None:
+        actions.append("value-date")
+    if len(actions) != 1:
+        raise ToolkitError(("--exclude/--restore/--remittance/--value-date",
+                            "give exactly one of --exclude, --restore, --remittance or "
+                            "--value-date"))
+    action = actions[0]
+
+    if action != "value-date" and getattr(args, "resolve", None) is not None:
+        raise ToolkitError(("--resolve", "only makes sense together with --value-date -- there "
+                            "is no decision to resolve otherwise"))
+
+    if signoff.is_signed_off(args.run):
+        raise ToolkitError(("amend", "this run is already signed off -- an amendment now would "
+                            "attest to a draft the reviewer never saw; there is nothing left to "
+                            "amend"))
+
+    reference = str(args.reference or "").strip()
+
+    if action == "value-date":
+        return _amend_value_date(args)
+
+    if action == "exclude":
+        return amend.record(args.run, reference=reference, change=amend.EXCLUDE,
+                            from_value=None, to_value=None, resolution=None,
+                            reason=args.reason, by=args.by)
+
+    if action == "restore":
+        if reference not in amend.excluded_references(args.run):
+            raise ToolkitError(("--restore", f"{reference!r} is not currently excluded in this "
+                                "run -- there is nothing to restore"))
+        return amend.record(args.run, reference=reference, change=amend.RESTORE,
+                            from_value=None, to_value=None, resolution=None,
+                            reason=args.reason, by=args.by)
+
+    # --remittance: record the audit-trail entry first, then apply it --
+    # never the other way around (see the docstring above).
+    current = _payment_field(args.run, reference, "remittance")
+    entry = amend.record(args.run, reference=reference, change="remittance",
+                         from_value=current, to_value=args.remittance, resolution=None,
+                         reason=args.reason, by=args.by)
+    _write_remittance(args.run, reference, args.remittance)
+    return entry
 
 
 # --- cmd_disposition / cmd_sign_off: cfo.payments.signoff does the
@@ -976,6 +1724,23 @@ def cmd_disposition(args):
 
 
 def cmd_sign_off(args):
+    """Delegates to `signoff.sign_off` for the recording itself (its
+    signature is untouched -- see the ruling in this task's own brief);
+    the two checks added here are Task 2's own, and both are skipped the
+    moment `signoff.sign_off` would refuse for its own, pre-existing
+    reason (an outstanding exception, or a run already signed off) --
+    checked read-only, via `signoff.outstanding`/`signoff.is_signed_off`,
+    so that refusal fires first and is never shadowed by either of ours.
+    A reviewer who has not looked at an exception must be told that, not
+    told their draft is stale."""
+    if not signoff.is_signed_off(args.run) and not signoff.outstanding(args.run):
+        draft = _read_state(args.run, "draft")
+        if draft is None:
+            raise ToolkitError(("draft", _NO_DRAFT_MESSAGE))
+        _assert_draft_file_present("draft", draft)
+        if not _draft_is_current(args.run):
+            since = len(amend.amendments(args.run)) - draft.get("amendment_count", 0)
+            raise ToolkitError(("draft", _stale_draft_message(since)))
     return signoff.sign_off(args.run, reviewed_by=args.by)
 
 
@@ -1007,86 +1772,6 @@ def _assert_batches_match_signoff(run_dir, batches):
                             "could disagree with what was actually reviewed and signed off"))
 
 
-def _rejected_exception_ids(run_dir):
-    """Every exception id whose *latest* disposition is a rejection.
-    `signoff.disposition`'s own docstring: calling it again for an
-    exception already dispositioned is allowed -- a changed mind is a
-    second entry, appended, never overwritten -- so the last entry
-    recorded for an id is the decision that actually stands. There is no
-    public getter in `cfo.payments.signoff` for every disposition at
-    once (only `outstanding`, which reports exactly the opposite: the
-    ones with *no* disposition at all), so this reads `signoff.json`
-    directly."""
-    state = read_json(os.path.join(run_dir, signoff.STATE_FILENAME))
-    if not state:
-        return set()
-    latest = {}
-    for entry in state.get("dispositions", []):
-        latest[entry["exception_id"]] = entry["accepted"]
-    return {exception_id for exception_id, accepted in latest.items() if not accepted}
-
-
-def _filter_rejected_payments(run_dir, batches):
-    """`batches`, with every payment a rejected exception named removed --
-    **B1.** `signoff.outstanding`'s own docstring already promised that a
-    rejected exception "won't become a payment line"; nothing before this
-    fix ever implemented that promise anywhere -- `cmd_build` read
-    `batches.json` and wrote it out, dispositions or no. A clone of this
-    tool that accepted every exception produced a byte-identical payment
-    file to one that rejected them all, because nothing here had ever
-    once compared the two.
-
-    `exception-meta.json`'s own `payment_reference` (set in `cmd_review`,
-    from the same invoice the payment was actually built from) is the
-    link, rather than re-matching a `where` string against a payment's
-    own `reference` -- the two are usually equal but are not the same
-    field, and are not guaranteed to agree (see `_invoice_to_payment`:
-    `reference` prefers `payment_reference` off the invoice itself, which
-    `_where` never reads at all).
-
-    **B6:** recomputes the surviving total two independent ways -- live,
-    fresh from `Batch.control_total` (a property, summed only from
-    whatever payments are actually left after filtering), and by
-    subtracting exactly what this function itself removed from the
-    batches' own original total -- and refuses to return anything at all
-    if the two disagree, or if a reference this run believed it had
-    dropped cannot actually be found in the batches given to it. A
-    filtered payment file whose own header disagreed with itself would be
-    worse than the bug this exists to fix: a bank would reject it, and
-    nobody would know why.
-    """
-    rejected_ids = _rejected_exception_ids(run_dir)
-    if not rejected_ids:
-        return list(batches), set()
-    meta = _read_state(run_dir, "exception-meta", {}) or {}
-    dropped_refs = {meta[exception_id]["payment_reference"] for exception_id in rejected_ids
-                   if meta.get(exception_id, {}).get("payment_reference")}
-    if not dropped_refs:
-        return list(batches), set()
-
-    original_total = sum((batch.control_total for batch in batches), Decimal("0"))
-    filtered, dropped_total, found_refs = [], Decimal("0"), set()
-    for batch in batches:
-        kept = []
-        for payment in batch.payments:
-            if payment.reference in dropped_refs:
-                dropped_total += payment.amount
-                found_refs.add(payment.reference)
-                continue
-            kept.append(payment)
-        filtered.append(dataclasses.replace(batch, payments=kept))
-    filtered = [batch for batch in filtered if batch.payments]  # an emptied batch ships nothing
-
-    live_total = sum((batch.control_total for batch in filtered), Decimal("0"))
-    expected_total = original_total - dropped_total
-    if live_total != expected_total or found_refs != dropped_refs:
-        raise ToolkitError(("payments", f"the payment total after removing rejected payments "
-                            f"({live_total}) does not match the total this run recomputed "
-                            f"independently ({expected_total}) -- refusing to emit a payment "
-                            "file that could disagree with what was actually reviewed"))
-    return filtered, dropped_refs
-
-
 def cmd_build(args):
     """Builds every requested output. **B4:** every one of them is built
     to a temporary file inside `outputs/` itself first, and nothing is
@@ -1098,16 +1783,16 @@ def cmd_build(args):
     checked against the run's own signed-off record before anything is
     built, for every output, not only the workbook. **B1:** `pain001` and
     `csv` -- the two that are an actual payment instruction -- are built
-    from `_filter_rejected_payments`'s own, filtered batches; `workbook`
+    from `amend.instructed_batches`'s own, filtered batches; `workbook`
     and `report` still read the unfiltered `batches` for every count and
     total that must match the signed-off record `_assert_batches_match_
     signoff` just checked them against -- but the workbook is also handed
-    the same `dropped_refs` `_filter_rejected_payments` returns, so it can
+    the same `dropped_refs` `amend.instructed_batches` returns, so it can
     mark which rows were actually excluded and show the instructed total
     beside the reviewed one (**N4**, second review -- see
-    `_filter_rejected_payments`'s own docstring and
+    `amend.instructed_batches`'s own docstring and
     `cfo.payments.workbook.build_payments_workbook`'s `dropped_references`
-    parameter). `_filter_rejected_payments` is now called unconditionally,
+    parameter). `amend.instructed_batches` is now called unconditionally,
     not only when pain001/csv were requested: a run built with the default
     `workbook,report` outputs is exactly the reproduction the second review
     used -- four rejections, nineteen payments, no marker on any of them
@@ -1150,7 +1835,7 @@ def cmd_build(args):
     # requested -- the workbook (built by default, alongside the report)
     # needs to know which references were dropped too, even when no
     # payment instruction is being built at all this call.
-    payment_batches, dropped_refs = _filter_rejected_payments(args.run, batches)
+    payment_batches, dropped_refs = amend.instructed_batches(args.run, batches)
 
     files, warnings = {}, []
     # Nothing below is written under its real name until every requested
@@ -1192,9 +1877,24 @@ def cmd_build(args):
                                sell_currency="", external_reference="", payments=[])))
             files["csv"] = final_path
         if dropped_refs:
-            warnings.append(("payments", f"{len(dropped_refs)} payment(s) were excluded "
-                             "because the exception raised against them was rejected: " +
-                             ", ".join(sorted(dropped_refs))))
+            # B2 (F6): `dropped_refs` is the union of two sources -- a
+            # rejected exception and an amendment `--exclude` are two
+            # different reasons a reference is not being paid, and the
+            # only message this run ever produces about it must name the
+            # right one. `excluded_references` is re-read rather than
+            # trusted from earlier in this call so this reflects the same
+            # amendments.json `dropped_refs` itself was built from, not a
+            # second, possibly-stale copy.
+            excluded_refs = dropped_refs & amend.excluded_references(args.run)
+            rejected_refs = dropped_refs - excluded_refs
+            if rejected_refs:
+                warnings.append(("payments", f"{len(rejected_refs)} payment(s) were excluded "
+                                 "because the exception raised against them was rejected: " +
+                                 ", ".join(sorted(rejected_refs))))
+            if excluded_refs:
+                warnings.append(("payments", f"{len(excluded_refs)} payment(s) were excluded "
+                                 "by `payments amend --exclude`: " +
+                                 ", ".join(sorted(excluded_refs))))
         if "workbook" in names:
             final_path = os.path.join(out_dir,
                                       f"{slug}-payments-workbook{marker}-{date_part}.xlsx")
@@ -1256,6 +1956,66 @@ def cmd_build(args):
                 os.remove(twin_path)
 
     return {"files": files, "signed_off": signed_off, "_warnings": warnings}
+
+
+# --- cmd_final: stage 3's own command -- Task 5 of the staged-output
+# milestone. `payments build --outputs ...` keeps working, unchanged, for
+# anyone scripting the tool (the one thing that must stay true); `payments
+# final` is the staged surface over the exact same, already-tested logic:
+# "tidied" (excluded payments gone, amendments applied, control totals
+# recomputed, no NOT-REVIEWED marking) is what `cmd_build` already produces
+# for a signed-off run -- asserted here, never re-implemented.
+#
+# The one behaviour `cmd_final` adds is the gate: confirmed, unconditionally,
+# for every output it can be asked for -- never `cmd_build`'s own finer-
+# grained per-output gate, which still lets `workbook`/`report` be built pre-
+# signoff as drafts. "Confirmed" is `signoff.is_signed_off`; when it is not
+# yet true, this names the most specific reason within "not confirmed" --
+# reusing Task 2's own two draft messages (constraint 3: "do not retype
+# either sentence") rather than a fresh guess, and falling back to the
+# pre-existing "cannot be built before sign-off" wording (moved here from
+# `cmd_build`'s own per-output refusal, to where the stage boundary
+# actually is) only when a current draft exists but sign-off itself simply
+# has not happened yet.
+#
+# Checking `is_signed_off` FIRST, before either draft check, matters: once
+# it is True, Task 2's own draft machinery already guarantees a current
+# draft existed at the moment of sign-off (cmd_sign_off's own two checks),
+# and nothing can move `batches.json` out from under that draft afterwards
+# (`cmd_amend`/`signoff.restate` both refuse post-signoff) -- so a signed-off
+# run is never asked to satisfy a draft check that a deleted `draft.json`
+# could otherwise make it fail with the wrong, misleading message ("run
+# `payments draft`" when `cmd_draft` itself would refuse, naming this
+# command instead).
+
+_NOT_SIGNED_OFF_MESSAGE = ("cannot be built before sign-off (`payments sign-off`); a "
+                           "NOT-REVIEWED draft is available via `payments draft` instead")
+
+
+def cmd_final(args):
+    """`payments final` -- refuses until the draft has been confirmed
+    (spec criterion 3: "refuses before the draft has been confirmed, and
+    writes nothing"), then delegates to `cmd_build` for everything else:
+    the outputs it can build (`csv`, `pain001`, and `workbook`/`report`
+    alongside, per the design doc's own menu), the tidying, and the
+    dropped NOT-REVIEWED marking, are all `cmd_build`'s own logic,
+    unchanged -- see the module comment above this function for why this
+    never re-implements any of it.
+
+    Nothing is written before the confirmation check passes: every
+    refusal below raises before `cmd_build` is ever called, so a failed
+    `payments final` leaves the run's `outputs/` folder exactly as it
+    was."""
+    if not signoff.is_signed_off(args.run):
+        draft = _read_state(args.run, "draft")
+        if draft is None:
+            raise ToolkitError(("final", _NO_DRAFT_MESSAGE))
+        _assert_draft_file_present("final", draft)
+        if not _draft_is_current(args.run):
+            since = len(amend.amendments(args.run)) - draft.get("amendment_count", 0)
+            raise ToolkitError(("final", _stale_draft_message(since)))
+        raise ToolkitError(("final", _NOT_SIGNED_OFF_MESSAGE))
+    return cmd_build(args)
 
 
 # --- cmd_judgement_input / cmd_judgement_collect: the one AI-task step
@@ -1398,11 +2158,108 @@ def cmd_red_team(args):
     return {"input": path, "material": material}
 
 
+# --- cmd_register: the extract-only path -- Task 9, added 2026-09-22.
+# `payments register --run <run>` writes one CSV of what the collected
+# invoices say. It needs no `check`, no `review`, no `batches.json` and no
+# sign-off -- see task-9-brief.md and the spec's "Two modes, chosen at the
+# start" for the three rulings this exists to satisfy. It writes no
+# run-state file at all (`checked`, `flags`, `batches`, `exception-meta`,
+# `signoff.json` -- none of them), only the one output file below, so a
+# run can freely go on to `check`/`review`/`build` afterwards exactly as if
+# this had never been called.
+#
+# **No fraud check runs here, at all -- not run-and-hidden, not run.**
+# `cfo.payments.fraud` is never imported by this module in the first place
+# (see the top of the file); this function calls nothing from it, directly
+# or indirectly. A mode called "extract only" that quietly ran the checks
+# anyway would be neither one thing nor the other -- Gearoid's ruling.
+#
+# **The bank details are the same lifted value the reviewed path uses,
+# never re-lifted here and never typed by a model.** `_canonical_invoices`
+# (above, in the `cmd_check` section) already carries whatever
+# `cfo.payments.extract.invoice_from_output` resolved at `payments collect`
+# time -- T5's script-side IBAN/account-number lift, checksummed against
+# the source text. This function only ever reads that value back off the
+# dict, exactly the way `_invoice_to_payment` does for the reviewed path's
+# own payments; it never calls a lifter a second time and never accepts
+# one from anywhere else.
+#
+# **The file says what it is on its face, in two places.** `NOT-CHECKED`
+# in the filename, and -- because a filename survives only until someone
+# renames it, and the content is what actually reaches a bank -- a banner
+# as the literal first row of the file, above the header row. Do not "fix"
+# the naive-CSV-parser-skips-one-line consequence of that; it is the
+# point, not a wart.
+
+REGISTER_BANNER = ("These invoices have NOT been checked for fraud, and nobody has signed "
+                   "them off. This is not a payment file.")
+
+REGISTER_COLUMNS = ("file", "invoice_number", "supplier_name", "bill_to", "invoice_date",
+                    "due_date", "currency", "net", "vat", "gross", "payment_reference",
+                    "iban", "account_number", "bic", "vat_number", "cost_category",
+                    "contact_email")
+
+
+def _register_row(invoice):
+    """One `REGISTER_COLUMNS` row, straight off `invoice` -- the two date
+    fields as ISO strings (`_canonical_invoices` already parsed them into
+    `datetime.date`), every other field exactly the string
+    `_canonical_invoices`/`invoice_from_output` already carries: blank when
+    the invoice never stated it, or it never resolved (an IBAN that failed
+    its checksum, say) -- never fabricated, and never reformatted."""
+    row = {name: str(invoice.get(name) or "") for name in REGISTER_COLUMNS}
+    row["file"] = str(invoice.get("filename") or "")
+    row["invoice_number"] = str(invoice.get("number") or "")
+    for field in ("invoice_date", "due_date"):
+        value = invoice.get(field)
+        row[field] = value.isoformat() if isinstance(value, datetime.date) else ""
+    return row
+
+
+def cmd_register(args):
+    """`payments register --run <run>`: one CSV of what the collected
+    invoices say -- see the module-level comment directly above this
+    function for the three rulings this exists to satisfy. Refuses only
+    when nothing has been collected at all yet."""
+    invoices = _canonical_invoices(args.run)
+    if not invoices:
+        raise ToolkitError(("invoice-results", "no invoices have been collected yet for this "
+                            "run: run `payments extract-input`, then `payments collect`, for "
+                            "at least one invoice first"))
+
+    run = runs.load_run(args.run)
+    slug = str(run.get("company_slug") or "").strip("-") or "payments"
+    date_part = run.get("started_at", "")[:10]
+    out_dir = os.path.join(args.run, "outputs")
+    os.makedirs(out_dir, exist_ok=True)
+    final_path = os.path.join(out_dir, f"{slug}-invoice-register-NOT-CHECKED-{date_part}.csv")
+
+    # Staged and renamed into place the same way `cmd_build` stages its own
+    # outputs (B4): nothing under the real name until the whole file is
+    # written without raising.
+    with tempfile.TemporaryDirectory(dir=out_dir) as stage_dir:
+        tmp_path = os.path.join(stage_dir, os.path.basename(final_path))
+        with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
+            csv.writer(fh).writerow([REGISTER_BANNER])
+            writer = csv.DictWriter(fh, fieldnames=REGISTER_COLUMNS)
+            writer.writeheader()
+            for invoice in invoices:
+                writer.writerow(_register_row(invoice))
+        os.replace(tmp_path, final_path)
+
+    return {"file": final_path, "invoices": len(invoices),
+            "_warnings": [("payments register", "no fraud checks were run on these invoices "
+                          "in this mode -- not run and hidden, not run at all -- and nobody "
+                          "has reviewed or signed off on them; this file is not a payment "
+                          "file")]}
+
+
 COMMANDS = {"start": cmd_start, "extract-input": cmd_extract_input, "collect": cmd_collect,
             "mark-failed": cmd_mark_failed, "check": cmd_check, "review": cmd_review,
-            "disposition": cmd_disposition, "sign-off": cmd_sign_off, "build": cmd_build,
-            "red-team": cmd_red_team, "judgement-input": cmd_judgement_input,
-            "judgement-collect": cmd_judgement_collect}
+            "draft": cmd_draft, "amend": cmd_amend, "disposition": cmd_disposition,
+            "sign-off": cmd_sign_off, "build": cmd_build, "final": cmd_final,
+            "register": cmd_register, "red-team": cmd_red_team,
+            "judgement-input": cmd_judgement_input, "judgement-collect": cmd_judgement_collect}
 
 
 def dispatch(args):

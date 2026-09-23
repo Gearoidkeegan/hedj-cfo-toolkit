@@ -44,6 +44,33 @@ it onto the payment model -- see that module's `SCALAR_FIELDS`). Without a
 mapping, every payment is grouped under "Uncategorised" in the Summary
 sheet's cost-category section -- an honest statement that this run has no
 category data, never an invented one.
+
+**Task 5 of the payments: staged-output milestone -- the Amendments sheet,
+handed over by Task 3.** The spec's acceptance criterion 6 ("every
+amendment appears in the audit trail with its reason and its author") was
+only half true: `amendments.json` (`cfo.payments.amend`, Tasks 1/3/4)
+records every change, but that file lives inside the run folder, where a
+reviewer, an auditor or a financial controller will never look.
+`_amendments_sheet` below projects that same record onto this workbook --
+one row per entry, in the order it was recorded, never re-derived or
+re-decided (see its own docstring): this module still never disagrees
+with a different source of truth, it just adds a fifth place the one
+that already exists is actually read.
+
+**F1 (Summary sheet review, 2026-09-23).** The Payments sheet has known
+about exclusions since N4: an excluded row is marked, and a "Run total
+(instructed)" sits beside the reviewed "Run total". The Summary sheet's
+own grouped tables did not -- built from the full reviewed set with no
+`dropped`/`excluded` concept anywhere in `_currency_rows` or the grouping
+helpers, so a payee, cost category or due week with every payment
+excluded from it still read as an ordinary total, on the one sheet a
+reader opens first. `_currency_rows`/`_grouped_rows` now take the same
+`dropped_references` the Payments sheet already has, and add an
+`instructed_amount` column beside `amount` -- mirroring that sheet's own
+wording rather than inventing a second one, and left blank wherever the
+two figures would be identical (see `_add_instructed_amount`). The two
+sheets' totals are asserted, not merely hoped, to reconcile
+(`_assert_reconciles_with_payments_sheet`).
 """
 import os
 from datetime import date
@@ -53,7 +80,7 @@ from cfo import runs
 from cfo.console import ToolkitError
 from cfo.io import locked, read_json
 from cfo.market.rates import convert, ecb_rates
-from cfo.payments import signoff
+from cfo.payments import amend, signoff
 from cfo.payments.fraud import FLAG_EXCEPTION_MESSAGE_RE as _FLAG_EXCEPTION_MESSAGE_RE
 from cfo.workbook.build import build_workbook
 
@@ -61,6 +88,7 @@ SHEET_PAYMENTS = "Payments"
 SHEET_EXCEPTIONS = "Exceptions"
 SHEET_SUMMARY = "Summary"
 SHEET_SIGNOFF = "Sign-off"
+SHEET_AMENDMENTS = "Amendments"
 
 UNCATEGORISED = "Uncategorised"
 
@@ -387,17 +415,59 @@ def _summary_columns():
         {"key": "currency", "label": "Currency", "type": "text", "width": 10},
         {"key": "count", "label": "Payments", "type": "number", "format": "0", "width": 12},
         {"key": "amount", "label": "Amount", "type": "number", "format": "#,##0.00", "width": 16},
+        # F1 (Summary sheet review, 2026-09-23): the instructed figure
+        # beside the reviewed one above -- mirrors the Payments sheet's
+        # own "Run total" / "Run total (instructed)" wording (see
+        # `_payments_sheet`) rather than a new label. Left blank (never
+        # repeated) when this group has nothing excluded from it -- see
+        # `_add_instructed_amount` below.
+        {"key": "instructed_amount", "label": "Amount (instructed)", "type": "number",
+         "format": "#,##0.00", "width": 16},
         {"key": "converted_amount", "label": "Converted amount", "type": "number",
          "format": "#,##0.00", "width": 18},
         {"key": "converted_currency", "label": "Converted currency", "type": "text", "width": 14},
         {"key": "rate", "label": "Rate", "type": "number", "format": "0.0000", "width": 12},
         {"key": "rate_date", "label": "Rate date", "type": "date", "width": 14},
+        # E1: what this rate actually is, in the same row as the rate and
+        # its date -- ECB reference, mid-market, indicative -- and, when
+        # `rate_table["stale"]` says so, that it is not current and the
+        # date it is actually from. Populated only when a conversion
+        # succeeded (see `_rate_basis_note`); left blank, like `rate`
+        # itself, for a row that was not converted at all.
+        {"key": "rate_basis", "label": "Rate basis", "type": "text", "width": 70},
         # B4: populated only when a conversion this row needed could not be
         # done -- no ECB rate reachable at all, or none for this specific
         # currency -- so the row says plainly it was not converted, and why,
         # rather than the workbook failing to build over one missing rate.
         {"key": "conversion_note", "label": "Conversion note", "type": "text", "width": 50},
     ]
+
+
+_RATE_BASIS = "ECB euro reference rate: mid-market and indicative; your bank's own rate will differ"
+
+
+def _rate_basis_note(rate_table):
+    """One plain sentence for the Summary row a converted figure already
+    sits in -- never a footnote -- naming what that number actually is:
+    the ECB's own euro reference rate, a mid-market figure published once
+    a business day, indicative rather than dealable, and a plain
+    statement that the customer's own bank will quote something
+    different (its spread sits inside that quote rather than showing as
+    a separate fee) -- so a reader is never left thinking this is what
+    left, or will leave, the bank account.
+
+    When `rate_table` is `ecb_rates`'s own cache-fallback result
+    (`stale: True` -- see that module's docstring: a real path, reached
+    whenever the ECB is unreachable, which a corporate TLS-inspecting
+    network hits routinely), the same sentence also names the actual
+    date the rate is from and says plainly it is not current -- before
+    this function existed, `stale` was read nowhere in this file (grep
+    for it turned up nothing), so a rate of unknown age rendered
+    identically to today's."""
+    if rate_table.get("stale"):
+        return (f"{_RATE_BASIS}; and this one is not current -- the latest reachable rate is "
+                f"dated {rate_table.get('date')}, not today's.")
+    return f"{_RATE_BASIS}."
 
 
 def _record_conversion_failure(currency, home_currency, exc, warnings):
@@ -419,9 +489,11 @@ def _record_conversion_failure(currency, home_currency, exc, warnings):
 def _conversion_fields(native_total, currency, home_currency, rate_cache, warnings):
     """`{}` when `currency` is `home_currency` -- nothing was converted, so
     nothing is claimed. Otherwise the converted amount, the currency it was
-    converted into, the rate used and the date it came from -- always all
-    four together, in the same row, per the brief: a converted figure with
-    no rate is a number nobody can check.
+    converted into, the rate used, the date it came from, and (E1) one
+    plain sentence naming what kind of rate it is -- always all five
+    together, in the same row, per the brief: a converted figure with no
+    rate, or no statement of what the rate is, is a number nobody can
+    check or trust at face value.
 
     **B4:** neither `rate_cache.get()` (no rate reachable at all -- offline,
     or an SSL verification failure, which a corporate TLS-inspecting proxy
@@ -429,7 +501,9 @@ def _conversion_fields(native_total, currency, home_currency, rate_cache, warnin
     table that simply has no entry for this particular currency) may raise
     out of this function. Either failure degrades this row to a single
     `conversion_note` field that says plainly the figure was not converted,
-    and why -- never the whole workbook lost over one missing rate."""
+    and why -- never the whole workbook lost over one missing rate. That
+    row carries no `rate_basis` either: a figure that was never converted
+    has no rate to describe."""
     if not home_currency or currency == home_currency:
         return {}
     try:
@@ -440,28 +514,67 @@ def _conversion_fields(native_total, currency, home_currency, rate_cache, warnin
         return {"conversion_note": _record_conversion_failure(currency, home_currency, exc,
                                                               warnings)}
     return {"converted_amount": _money(converted), "converted_currency": home_currency,
-           "rate": _money(unit_rate), "rate_date": rate_table["date"]}
+           "rate": _money(unit_rate), "rate_date": rate_table["date"],
+           "rate_basis": _rate_basis_note(rate_table)}
 
 
-def _currency_rows(batches, home_currency, rate_cache, warnings):
-    totals, counts = {}, {}
+def _instructed_total(payments, dropped_references):
+    """The same `payments`, summed with any `dropped_references` excluded
+    -- the "instructed" half of the pair `_payments_sheet` already shows
+    for the whole run (Payment.amount, never a different source, just the
+    same filter that sheet's own "Run total (instructed)" applies)."""
+    return sum((p.amount for p in payments if p.reference not in dropped_references),
+              Decimal("0"))
+
+
+def _add_instructed_amount(row, native_total, payments, dropped_references):
+    """Sets `row["instructed_amount"]` only when it would actually differ
+    from `row["amount"]` -- F1 (Summary sheet review, 2026-09-23): "where
+    a group's two figures are equal, one is enough; a reader should not
+    have to scan a column of identical pairs to find the one that
+    differs." Left unset (blank cell) for the ordinary, nothing-excluded
+    case, and for a group nothing was excluded from even when other groups
+    in the same run had exclusions -- so the control (no exclusions at
+    all) and an unaffected group inside an otherwise-affected run both
+    read exactly as before this fix."""
+    if not dropped_references:
+        return
+    instructed_total = _instructed_total(payments, dropped_references)
+    if instructed_total != native_total:
+        row["instructed_amount"] = _money(instructed_total)
+
+
+def _currency_rows(batches, home_currency, rate_cache, warnings, dropped_references=()):
+    totals, counts, instructed_totals = {}, {}, {}
     for batch in batches:
         # Batch.control_total and Batch.count, read directly and summed --
         # never a re-derivation from the individual payments (rule: never a
         # different source than the batch the payment file was built from).
         totals[batch.sell_currency] = totals.get(batch.sell_currency, Decimal("0")) + batch.control_total
         counts[batch.sell_currency] = counts.get(batch.sell_currency, 0) + batch.count
+        # F1: the instructed half, from the batch's own payments -- the
+        # same per-payment filter `_payments_sheet` already applies, just
+        # grouped by currency instead of by batch.
+        if dropped_references:
+            instructed_totals[batch.sell_currency] = (
+                instructed_totals.get(batch.sell_currency, Decimal("0")) +
+                _instructed_total(batch.payments, dropped_references))
     rows = []
     for currency in sorted(totals):
         row = {"section": "By currency", "group": currency, "currency": currency,
               "count": counts[currency], "amount": _money(totals[currency])}
+        if dropped_references:
+            instructed_total = instructed_totals.get(currency, Decimal("0"))
+            if instructed_total != totals[currency]:
+                row["instructed_amount"] = _money(instructed_total)
         row.update(_conversion_fields(totals[currency], currency, home_currency, rate_cache,
                                       warnings))
         rows.append(row)
-    return rows, totals
+    return rows, totals, instructed_totals
 
 
-def _grouped_rows(section, payments, key_fn, home_currency, rate_cache, warnings):
+def _grouped_rows(section, payments, key_fn, home_currency, rate_cache, warnings,
+                  dropped_references=()):
     groups = {}
     for payment in payments:
         key = key_fn(payment)
@@ -475,6 +588,7 @@ def _grouped_rows(section, payments, key_fn, home_currency, rate_cache, warnings
         native_total = sum((p.amount for p in group_payments), Decimal("0"))
         row = {"section": section, "group": label, "currency": currency,
               "count": len(group_payments), "amount": _money(native_total)}
+        _add_instructed_amount(row, native_total, group_payments, dropped_references)
         row.update(_conversion_fields(native_total, currency, home_currency, rate_cache, warnings))
         rows.append(row)
     return rows
@@ -508,22 +622,60 @@ def _assert_matches_batches(batches, all_payments):
                             "a workbook that could disagree with the payment file"))
 
 
-def _summary_sheet(batches, home_currency, rates, cost_categories, run_dir, warnings):
+def _assert_reconciles_with_payments_sheet(batches, dropped_references, currency_totals,
+                                           currency_instructed_totals):
+    """F1 (Summary sheet review, 2026-09-23), the acceptance criterion's own
+    words: 'the totals across the grouped tables reconcile with the
+    Payments sheet's own two totals. Assert this, because two places
+    computing the same number is how they come to disagree.'
+
+    `currency_totals`/`currency_instructed_totals` are `_currency_rows`'s
+    own per-currency figures -- summed across every currency here, exactly
+    the way `_payments_sheet`'s "Run total"/"Run total (instructed)" rows
+    already mix currencies together (a pre-existing choice of that sheet's,
+    not one this assertion tries to fix). Both totals below are computed a
+    THIRD way, straight off `batches`, the same object `_payments_sheet`
+    itself sums -- not a second read of the same numbers `_currency_rows`
+    already produced, which would only prove this function can copy its
+    own arithmetic."""
+    reviewed_total = sum((batch.control_total for batch in batches), Decimal("0"))
+    if sum(currency_totals.values(), Decimal("0")) != reviewed_total:
+        raise ToolkitError(("summary", "the Summary sheet's own reviewed total does not match "
+                            "the Payments sheet's Run total -- refusing to write a workbook "
+                            "whose two sheets could disagree about the same number"))
+    if not dropped_references:
+        return
+    all_payments = [payment for batch in batches for payment in batch.payments]
+    instructed_total = _instructed_total(all_payments, dropped_references)
+    if sum(currency_instructed_totals.values(), Decimal("0")) != instructed_total:
+        raise ToolkitError(("summary", "the Summary sheet's own instructed total does not match "
+                            "the Payments sheet's Run total (instructed) -- refusing to write a "
+                            "workbook whose two sheets could disagree about the same number"))
+
+
+def _summary_sheet(batches, home_currency, rates, cost_categories, run_dir, warnings,
+                   dropped_references=()):
+    # F1 (Summary sheet review, 2026-09-23): normalised once, exactly as
+    # `_payments_sheet` normalises its own copy of the same set, so every
+    # helper below can treat an absent set and an empty one alike.
+    dropped_references = set(dropped_references or ())
     cache_dir = _rate_cache_dir(run_dir) if run_dir else None
     rate_cache = _RateCache(rates, cache_dir)
     all_payments = [payment for batch in batches for payment in batch.payments]
     _assert_matches_batches(batches, all_payments)
 
-    currency_rows, _totals = _currency_rows(batches, home_currency, rate_cache, warnings)
+    currency_rows, totals, instructed_totals = _currency_rows(batches, home_currency, rate_cache,
+                                                               warnings, dropped_references)
+    _assert_reconciles_with_payments_sheet(batches, dropped_references, totals, instructed_totals)
     payee_rows = _grouped_rows("By payee", all_payments,
                               lambda p: (p.beneficiary_name or "(no beneficiary)", p.currency),
-                              home_currency, rate_cache, warnings)
+                              home_currency, rate_cache, warnings, dropped_references)
     category_rows = _grouped_rows(
         "By cost category", all_payments,
         lambda p: ((cost_categories or {}).get(p.reference) or UNCATEGORISED, p.currency),
-        home_currency, rate_cache, warnings)
+        home_currency, rate_cache, warnings, dropped_references)
     week_rows = _grouped_rows("By due week", all_payments, lambda p: (_due_week(p), p.currency),
-                              home_currency, rate_cache, warnings)
+                              home_currency, rate_cache, warnings, dropped_references)
 
     rows = currency_rows + payee_rows + category_rows + week_rows
     return {"name": SHEET_SUMMARY, "freeze": "A2", "columns": _summary_columns(), "rows": rows}
@@ -546,7 +698,12 @@ def _signoff_sheet(control):
     rows = [
         {"field": "Run ID", "value": control["run_id"]},
         {"field": "Tool version", "value": control["tool_version"]},
-        {"field": "Prepared by", "value": control["prepared_by"]},
+        # Defect F1 (Summary sheet review, 2026-09-23), small item:
+        # `signoff.prepared_by_label` annotates the raw account name
+        # (`getpass.getuser()`, an operational detail -- see that
+        # module's own docstring) so it never reads as a person, sitting
+        # right above "Reviewed by" below.
+        {"field": "Prepared by", "value": signoff.prepared_by_label(control["prepared_by"])},
         {"field": "Prepared at", "value": control["prepared_at"]},
         # Left blank (not a placeholder string) exactly when control_block
         # says so -- the words explaining why live in "Review status" below,
@@ -562,6 +719,81 @@ def _signoff_sheet(control):
     for entry in control["source_files"]:
         rows.append({"field": "Source file", "value": entry["name"], "sha256": entry["sha256"]})
     return {"name": SHEET_SIGNOFF, "freeze": "A2", "columns": _signoff_columns(), "rows": rows}
+
+
+# The `change` values `cfo.payments.amend`/`cfo.payments.cli` actually
+# record (`amend.EXCLUDE`/`amend.RESTORE`/`amend.VALUE_DATE`, and the plain
+# literal `"remittance"` `cmd_amend` itself writes -- there is no constant
+# for that one; see `cli.cmd_amend`), given a plain-words label for the
+# "what changed" column. An unrecognised `change` (a future amendment kind
+# this module has not been taught about) falls back to itself in
+# `_amendments_sheet` rather than disappearing -- see there.
+_CHANGE_LABELS = {
+    amend.EXCLUDE: "Excluded",
+    amend.RESTORE: "Restored",
+    amend.VALUE_DATE: "Value date changed",
+    "remittance": "Remittance changed",
+}
+
+
+def _amendments_columns():
+    return [
+        {"key": "reference", "label": "Reference", "type": "text", "width": 18, "required": True},
+        {"key": "change", "label": "Change", "type": "text", "width": 22, "required": True},
+        {"key": "resolution", "label": "Resolution", "type": "text", "width": 16},
+        {"key": "from", "label": "From", "type": "text", "width": 26},
+        {"key": "to", "label": "To", "type": "text", "width": 26},
+        {"key": "reason", "label": "Reason", "type": "text", "width": 40},
+        {"key": "by", "label": "By", "type": "text", "width": 20},
+        {"key": "at", "label": "When", "type": "text", "width": 24},
+    ]
+
+
+def _amendments_sheet(run_dir):
+    """One row per amendment ever recorded for this run
+    (`amend.amendments(run_dir)`), in the exact order `amend.record`
+    appended them -- the audit trail's own order, never re-sorted and
+    never re-decided. This is the fix for the gap Task 3 flagged and
+    declined to close unilaterally (`workbook.py` was not in its file
+    list): `amendments.json` alone answers "who changed this payment, and
+    why?" only for a developer who knows to open a JSON file inside the
+    run folder -- this is the same answer, in the one place a reviewer,
+    an auditor or a financial controller will actually look.
+
+    Each row is a straight projection of the stored entry's own
+    `reference`/`change`/`from`/`to`/`resolution`/`reason`/`by`/`at` keys
+    -- nothing here recomputes what changed or infers a reason; `change`
+    gets a plain-words label (`_CHANGE_LABELS`) purely for readability,
+    falling back to the raw value for a kind this module does not
+    recognise, so nothing is ever silently dropped. `resolution` is blank
+    for every amendment except a value-date one that actually crossed a
+    batch boundary and was resolved -- naming exactly which of the three
+    choices (`keep-in-batch`/`own-batch`/`hold-back`) the reviewer chose,
+    because that is exactly the thing a later reader will want to
+    understand. A `hold-back` resolution is recorded with `change` set to
+    the same `exclude` a plain `--exclude` uses (Task 4's own choice, so
+    it needs no second exclusion code path) -- the `Resolution` column is
+    what tells the two apart here: blank for a plain exclusion, named for
+    one that came from a value-date decision.
+
+    Empty -- zero rows, never a broken reference -- for a run with no
+    amendments recorded at all: the ordinary case, and the honest answer
+    ("nothing to audit yet"), not "amendments are unsupported here"."""
+    rows = []
+    for entry in amend.amendments(run_dir):
+        change = entry.get("change")
+        rows.append({
+            "reference": entry.get("reference", ""),
+            "change": _CHANGE_LABELS.get(change, change),
+            "resolution": entry.get("resolution"),
+            "from": entry.get("from"),
+            "to": entry.get("to"),
+            "reason": entry.get("reason", ""),
+            "by": entry.get("by", ""),
+            "at": entry.get("at", ""),
+        })
+    return {"name": SHEET_AMENDMENTS, "freeze": "A2", "columns": _amendments_columns(),
+           "rows": rows}
 
 
 def _assert_control_matches_batches(control, batches):
@@ -585,8 +817,9 @@ def _assert_control_matches_batches(control, batches):
 def build_payments_workbook(out_path, run_dir, batches, flags, performed, *,
                             unreadable_documents=(), home_currency=None, rates=None,
                             cost_categories=None, brand=None, dropped_references=()):
-    """Builds the four-sheet payments workbook at `out_path` through C5's
-    `build_workbook` -- Payments, Exceptions, Summary and Sign-off.
+    """Builds the five-sheet payments workbook at `out_path` through C5's
+    `build_workbook` -- Payments, Exceptions, Summary, Sign-off and
+    Amendments.
 
     `batches` is whatever `cfo.payments.batch.build_batches` returned (a
     `BatchSplit`, or any plain iterable of `Batch`) -- read directly for
@@ -629,6 +862,38 @@ def build_payments_workbook(out_path, run_dir, batches, flags, performed, *,
     itself is still always the run's full, unfiltered set (see
     `_payments_sheet`'s own docstring) -- this parameter only changes how
     those same rows are labelled, never which ones are written.
+
+    **F1 (Summary sheet review, 2026-09-23):** the same `dropped_references`
+    also reaches the Summary sheet's own By currency/By payee/By cost
+    category/By due week tables (`_summary_sheet`), each gaining an
+    `instructed_amount` column beside the existing `amount` -- before this,
+    those tables were built from the full reviewed set with no idea an
+    exclusion had happened at all, so a payee with every invoice withheld
+    still read as an ordinary total, on the sheet a reader opens first.
+    Left blank for a group nothing was excluded from (never a repeated,
+    identical pair), and asserted, not merely hoped, to reconcile with the
+    Payments sheet's own "Run total"/"Run total (instructed)"
+    (`_assert_reconciles_with_payments_sheet`) -- the same "never a second
+    source that could drift" rule the rest of this module already holds
+    to, applied to the one pair of sheets that both total the same run.
+
+    The **Amendments** sheet (Task 5, handed over by Task 3 -- see the
+    module docstring) needs nothing new from a caller: it reads
+    `run_dir`'s own `amendments.json` directly (`_amendments_sheet`), the
+    same file `dropped_references`/`amend.instructed_batches` are
+    already built from. Empty, not absent and not broken, for a run with
+    no amendments recorded yet.
+
+    **E1:** every converted row on the Summary sheet also carries a
+    `rate_basis` sentence beside the rate and its date (`_rate_basis_note`)
+    -- the ECB's euro reference rate, mid-market, indicative, so the
+    customer's own bank will quote something different -- and, when
+    `rate_table["stale"]` says the rate actually came from `ecb_rates`'s
+    cache fallback, the same sentence names the date it is from and says
+    plainly that it is not current. Nothing here changes which currencies
+    convert or which degrade to `conversion_note`; it only says, in the
+    row a reader is already looking at, what kind of number a converted
+    figure is.
     """
     batches = list(batches)
     control = signoff.control_block(run_dir)
@@ -642,8 +907,10 @@ def build_payments_workbook(out_path, run_dir, batches, flags, performed, *,
         _payments_sheet(batches, dropped_references),
         _exceptions_sheet(list(flags or []), performed or {}, list(unreadable_documents or []),
                           flag_dispositions),
-        _summary_sheet(batches, home_currency, rates, cost_categories, run_dir, warnings),
+        _summary_sheet(batches, home_currency, rates, cost_categories, run_dir, warnings,
+                      dropped_references),
         _signoff_sheet(control),
+        _amendments_sheet(run_dir),
     ]
     result = build_workbook({"sheets": sheets}, out_path, brand=brand)
     result["_warnings"] = warnings + list(result.get("_warnings", []))

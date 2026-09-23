@@ -113,9 +113,16 @@ sign off.
 Try it on the sample pack in `samples/payments/`, whose `README.md` is the answer key to what is
 planted where.
 
-**What it costs:** a measured figure for a typical run will be given here once one has been
-measured on a real run (pending the acceptance run). It runs in your own Claude account, so it
-draws on your plan's allowance, or on API prices if you use a key.
+**What it costs:** measured on a real run against the 20-invoice sample pack (19 readable, one
+scanned image with no text layer): about **$0.10** in model calls for the whole run —
+`payments start` through the staged draft/amend/sign-off cycle to `payments final`. That covers
+the per-invoice field extraction (Claude Haiku, roughly half a cent per invoice, ~19 invoices)
+and the one fraud-judgement task per batch (Claude Sonnet, judging which flags matter and
+grouping the ones that are a single story). Re-running `payments register` on the same invoices
+in a separate run cost nothing further: the extraction cache is shared across runs by content,
+so a second pass over the same documents is free. Figures exclude the optional red-team check.
+It runs in your own Claude account, so it draws on your plan's allowance, or on API prices if you
+use a key.
 
 ## Confidentiality
 

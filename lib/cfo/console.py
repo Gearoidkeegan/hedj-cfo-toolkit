@@ -63,15 +63,63 @@ def print_lines(level, items):
     sys.stderr.flush()
 
 
-def print_problems(errors, warnings):
+def print_problems(errors, warnings, important=None):
     """Print ERROR lines, then WARNING lines, capped at MAX_LINES total
-    (including a single summary line naming how many were not shown)."""
-    combined = [("ERROR", w, m) for w, m in errors] + [("WARNING", w, m) for w, m in warnings]
-    limit = MAX_LINES - 1 if len(combined) > MAX_LINES else len(combined)
-    for level, where, message in combined[:limit]:
+    (including a single summary line naming how many were not shown).
+
+    `important` -- an iterable of the same `(where, message)` tuples as
+    `warnings`, a subset a caller judges too consequential to ever lose to
+    truncation (D4, 2026-09-22 real run: a payer-mismatch warning that
+    `cmd_check` raised correctly was truncated away here by arrival order
+    alone, and the terminal showed nothing). Important warnings print
+    right after the errors, in full, however many there are; only the
+    ordinary warnings left over are truncated to fit whatever budget
+    remains, and -- when anything is actually hidden -- the summary names
+    how many errors and how many warnings were hidden and the `where` of
+    the first one, rather than a bare count nobody can act on.
+
+    Omitting `important` (the default, or an empty iterable) is untouched:
+    today's plain combined-list truncation, byte for byte -- nothing else
+    in the toolkit, none of whose other callers pass it, changes."""
+    if not important:
+        combined = [("ERROR", w, m) for w, m in errors] + [("WARNING", w, m) for w, m in warnings]
+        limit = MAX_LINES - 1 if len(combined) > MAX_LINES else len(combined)
+        for level, where, message in combined[:limit]:
+            sys.stderr.write(format_line(level, where, message) + "\n")
+        hidden = combined[limit:]
+        if hidden:
+            level = "ERROR" if any(lvl == "ERROR" for lvl, _, _ in hidden) else "WARNING"
+            sys.stderr.write(format_line(level, "toolkit", f"{len(hidden)} more not shown") + "\n")
+        sys.stderr.flush()
+        return
+
+    important_keys = {(str(w), str(m)) for w, m in important}
+    # Never truncated, however many there are: errors (as always) and the
+    # caller's declared-important warnings, in that order.
+    protected = ([("ERROR", w, m) for w, m in errors]
+                + [("WARNING", w, m) for w, m in important])
+    # Whatever's left, minus anything already shown above -- an important
+    # warning a caller also left in `warnings` (the normal case: it names
+    # a subset) is never printed twice.
+    ordinary = [("WARNING", w, m) for w, m in warnings
+               if (str(w), str(m)) not in important_keys]
+
+    if len(protected) + len(ordinary) <= MAX_LINES:
+        shown, hidden = ordinary, []
+    else:
+        room = max(0, MAX_LINES - 1 - len(protected))
+        shown, hidden = ordinary[:room], ordinary[room:]
+
+    for level, where, message in protected + shown:
         sys.stderr.write(format_line(level, where, message) + "\n")
-    hidden = combined[limit:]
+
     if hidden:
-        level = "ERROR" if any(lvl == "ERROR" for lvl, _, _ in hidden) else "WARNING"
-        sys.stderr.write(format_line(level, "toolkit", f"{len(hidden)} more not shown") + "\n")
+        hidden_errors = sum(1 for level, _, _ in hidden if level == "ERROR")
+        hidden_warnings = len(hidden) - hidden_errors
+        first_where = hidden[0][1]
+        summary_level = "ERROR" if hidden_errors else "WARNING"
+        sys.stderr.write(format_line(
+            summary_level, "toolkit",
+            f"{hidden_errors} errors, {hidden_warnings} warnings not shown, starting with "
+            f"{first_where!r}") + "\n")
     sys.stderr.flush()

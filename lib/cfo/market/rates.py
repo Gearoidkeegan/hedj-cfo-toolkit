@@ -36,6 +36,7 @@ amount is `Decimal`: two roundings of a float rate would not reverse
 exactly, and money must not carry that binary error.
 """
 import os
+import ssl
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import date
@@ -55,6 +56,42 @@ BASE_CURRENCY = "EUR"
 MAX_FEED_BYTES = 1_000_000
 
 
+def _ssl_context():
+    """The TLS context for the one request this toolkit makes.
+
+    Python does not verify HTTPS the way a browser does on every machine,
+    and the failure is silent in the way that matters: the rate lookup
+    fails, the run carries on, and FX lines never convert. Measured on a
+    clean Windows install, 2026-09-23 -- `ssl.create_default_context()`
+    loaded 60 certificates from the OS store and still could not build a
+    chain to the ECB, because Windows fetches intermediate roots on demand
+    through SChannel and Python's own loader only sees what is already
+    cached.
+
+    `truststore` is preferred because it asks the operating system the same
+    way a browser does. That matters most for exactly the people this tool
+    is for: a finance team behind a corporate TLS-inspecting proxy has its
+    employer's root in the OS store and in no bundle shipped by anyone, so
+    a static CA list would fail for them while the OS succeeds.
+
+    `certifi` is the fallback because it is ubiquitous and fixes the clean
+    machine above, and the stock context is the last resort so that a user
+    with neither installed is no worse off than before. Both are optional:
+    nothing here raises on a missing import, and `ecb_rates` still treats a
+    failed fetch as it always has -- fall back to cache, warn, carry on.
+    """
+    try:
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:
+        pass
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def _fetch_daily_xml() -> bytes:
     """The one place this module touches the network, kept to a single
     function so a test can stub exactly this and nothing else.
@@ -67,7 +104,8 @@ def _fetch_daily_xml() -> bytes:
     bounded number of bytes, and failing rather than truncating, removes.
     `ecb_rates` treats that failure like any other: fall back to cache, warn,
     carry on."""
-    with urllib.request.urlopen(ECB_URL, timeout=TIMEOUT_SECONDS) as response:
+    with urllib.request.urlopen(ECB_URL, timeout=TIMEOUT_SECONDS,
+                                context=_ssl_context()) as response:
         payload = response.read(MAX_FEED_BYTES + 1)
     if len(payload) > MAX_FEED_BYTES:
         raise ValueError(

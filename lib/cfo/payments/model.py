@@ -52,6 +52,25 @@ MAX_PAYMENTS_PER_BATCH = 199
 
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
+
+# XML 1.0's own `Char` production is `#x9 | #xA | #xD | [#x20-#xD7FF] |
+# ...` -- every other character below `#x20` is illegal. `cfo.payments.
+# emit.pain001.emit` writes several of this model's own fields straight
+# into XML text or attribute nodes with no escaping of that restriction,
+# so a value accepted here could still reach `pain001.emit` and produce
+# XML a bank's own parser would refuse outright (C3/F3's "while here":
+# the beneficiary name that can smuggle a second payment line past
+# `amend.lines_digest`, per `tests.test_payments_amend.
+# SeparatorInjectionTests`, is exactly such a value).
+_ILLEGAL_XML_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+# Every payment field `pain001.emit` writes into XML as plain text --
+# named once here so this list and that emitter's own field-by-field
+# writes cannot quietly drift apart. `beneficiary_address` (a dict) is
+# checked separately, below, since its own values are what reach XML,
+# not the dict itself.
+_XML_TEXT_FIELDS = ("reference", "beneficiary_name", "iban", "account_number", "bic",
+                    "remittance")
 # beneficiary_address_flat, beneficiary_address, beneficiary_country and the
 # other provider-only fields are deliberately not in this list -- see the
 # module docstring. Only these four are required for every payment,
@@ -76,7 +95,19 @@ class Payment:
     currency: str = ""                   # ISO 4217
     amount: Decimal = Decimal("0")
     value_date: date | None = None
-    reference: str = ""
+    reference: str = ""                  # the join key -- exception-meta.json,
+                                          # dropped_refs and the instructed-lines
+                                          # digest all key off this; never
+                                          # rewritten by a remittance amendment
+    remittance: str = ""                 # the free-text a supplier reads on
+                                          # their bank statement (pain.001's
+                                          # RmtInf/Ustrd, and the payment
+                                          # provider's own "reference" field).
+                                          # Blank means
+                                          # "fall back to reference" -- every
+                                          # emitter reads `remittance or
+                                          # reference`, never `remittance`
+                                          # alone.
     purpose_of_payment: str = ""
     reason_for_trade: str = ""
     direction: str = "sell"
@@ -163,6 +194,20 @@ def validate_batch(batch, *, valid_iban=None, max_payments=MAX_PAYMENTS_PER_BATC
         if not (has_valid_iban or has_account):
             errors.append((where, "needs either a valid IBAN, or an account number with a bank "
                                   "code or a BIC"))
+
+        # C3/F3 ("while here"): a value pain001.emit would write straight
+        # into XML must not carry a character XML 1.0 cannot legally hold
+        # -- refused here, at validation, rather than emitted as malformed
+        # XML `pain001.emit` never checks for.
+        for field in _XML_TEXT_FIELDS:
+            value = getattr(payment, field)
+            if value and _ILLEGAL_XML_CHAR_RE.search(value):
+                errors.append((where, f"{field} contains a control character that is not "
+                                      "legal in pain.001 XML"))
+        for key, value in (payment.beneficiary_address or {}).items():
+            if isinstance(value, str) and _ILLEGAL_XML_CHAR_RE.search(value):
+                errors.append((where, f"beneficiary_address.{key} contains a control "
+                                      "character that is not legal in pain.001 XML"))
 
         if not _missing(payment, "value_date") and payment.value_date < batch.execution_date:
             errors.append((f"{where}.value_date",

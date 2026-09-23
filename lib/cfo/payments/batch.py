@@ -49,6 +49,7 @@ happened: an extra, correctly-labelled batch, never a batch whose declared
 currency does not match what is actually in it, and never a run that stops
 dead over one invoice priced in the wrong currency.
 """
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -113,6 +114,47 @@ def _currency_order(groups, sell_currency):
     order = [sell_currency] if sell_currency in groups else []
     order.extend(others)
     return order
+
+
+_SEQUENCE_SUFFIX_RE = re.compile(r"^(\d+)$")
+
+
+def next_external_reference(existing, reference_prefix):
+    """The external reference `build_batches` would itself have assigned to
+    one more batch after every one of `existing` -- continuing the same
+    zero-padded `"<prefix>-<NNN>"` sequence `build_batches` numbers every
+    batch with, never restarting and never colliding with any reference
+    already in use, whatever produced it (`build_batches` itself, or an
+    earlier `payments amend --value-date --resolve own-batch` run through
+    this same function).
+
+    Task 4 of the payments: staged-output milestone needs this because
+    `own-batch` creates a batch outside `build_batches`'s own numbering
+    loop -- the one place in this tool a batch is assembled by hand rather
+    than produced by that loop, and the one place a hand-assigned
+    reference could otherwise collide with an existing one (two different
+    batches sharing an `external_reference` make `lines_digest` unable to
+    tell "one batch of two payments" apart from "two batches of one
+    payment each", since the digest's own canonical line never adds a
+    batch-boundary marker of its own -- see `cfo.payments.amend`).
+
+    Every `existing` batch's own `external_reference` that starts with
+    `"<reference_prefix>-"` and whose remaining suffix is all digits
+    contributes its own number; anything else (a hand-written fixture in a
+    test, say) is ignored rather than raising -- this only ever needs to
+    not collide with what is actually there, never to validate every
+    reference already on disk.
+    """
+    prefix_dash = f"{reference_prefix}-"
+    highest = 0
+    for produced in existing:
+        ref = getattr(produced, "external_reference", None) or ""
+        if not ref.startswith(prefix_dash):
+            continue
+        suffix = ref[len(prefix_dash):]
+        if _SEQUENCE_SUFFIX_RE.match(suffix):
+            highest = max(highest, int(suffix))
+    return f"{reference_prefix}-{highest + 1:03d}"
 
 
 def build_batches(invoices, *, debtor_account, execution_date, sell_currency,

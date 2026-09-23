@@ -98,6 +98,19 @@ no supplier paid by account number alone could ever clear the `bic`/
 `bank_code` check, and no brand-new payee's country could ever be checked
 against its own VAT prefix. See `SCALAR_FIELDS` below.
 
+`bill_to` (D2, 2026-09-22 real run) joins them for the same reason: it names
+a customer, not an account, so it carries none of the risk an IBAN or
+account number does either. It exists so `cfo.payments.cli` can compare the
+party an invoice is actually addressed to against the debtor name a run was
+started with, and warn -- loudly, never refusing -- when they disagree: the
+real defect this closes recorded Hedj as payer while both real invoices were
+billed to Booterstown United F.C., and said nothing at all. A blank
+`bill_to` is a real, reportable outcome in its own right (most invoices
+until this field has had a live-model verification run against real
+samples), not a reason to guess one from the supplier's own name or invent
+one from context -- see that module's own docstring for what the comparison
+does with it.
+
 This module also fixes a second defect the same review found (H2):
 `_bank_detail` used to call its lifter unconditionally for both
 `iban_location` and `account_number_location`, so whichever one a given
@@ -129,9 +142,16 @@ from cfo.extract.sink import loc_label
 # and `cfo.payments.fraud.iban_country_mismatch` needs a real `vat_number`
 # to have anything to fall back on for a brand-new payee with no master
 # record and no extracted `country` field -- see both modules' docstrings.
+#
+# `bill_to` (D2, 2026-09-22 real run) is the same kind of ordinary field:
+# the customer's own name off a "Bill to:" line, never a payment
+# destination on its own. `cfo.payments.cli.cmd_check`/`cmd_review` compare
+# it against the debtor name a run was started with, and against
+# `supplier_name` (D3, the same run), to catch a payment about to be built
+# for the wrong company -- see the module docstring above.
 SCALAR_FIELDS = ("supplier_name", "invoice_number", "invoice_date", "due_date", "net", "vat",
                  "gross", "currency", "payment_reference", "cost_category", "contact_email",
-                 "bic", "vat_number")
+                 "bic", "vat_number", "bill_to")
 
 # A run of letters and digits, the unit both the IBAN- and account-number
 # scans split a block's text into -- splitting on anything that is not
@@ -226,8 +246,66 @@ def find_located_block(location, extracted):
     return text, []
 
 
+def _spaced_iban_candidates(line):
+    """IBAN-shaped candidates compacted from runs of alphanumeric groups on
+    `line` joined by exactly one space each -- the ISO 13616 *printed*
+    format real invoices actually use ("IBAN: IE29 AIBK 9311 5212 3456
+    78"), which `_TOKEN_RE` alone would split into six short tokens, none
+    15 characters or longer, so `_IBAN_SHAPE_RE` could never match any of
+    them (D1, 2026-09-22: this is why a spaced IBAN used to vanish before
+    the checksum step ever ran).
+
+    Compacting is lossless: every character `_TOKEN_RE` found survives, in
+    order, and only the separating spaces are dropped -- see `lift_iban`'s
+    own docstring for why that is not the "re-cased or reformatted" this
+    module otherwise refuses to do.
+
+    `line` is always one line's own text -- callers pass one line at a
+    time (see `_iban_candidates`), never a whole block joined together --
+    so a group can never be welded to text on the line before or after it.
+    An IBAN that wraps a line is possible but rare, and joining across
+    lines risks combining two unrelated values into one that happens to
+    pass the checksum by luck; this function has no way to do that even by
+    accident.
+
+    Every contiguous window of two or more tokens within a maximal
+    single-space-joined run is tried, not only the run as a whole: a real
+    IBAN sitting right before unrelated text with nothing but a single
+    space between them ("...3456 78 Account name: ...") must still resolve
+    to itself, not be rejected because the *whole* run, compacted, no
+    longer has the right shape. A prose sentence, where adjacent words
+    joined this way essentially never happen to produce something 15-34
+    characters long starting with two letters then two digits, is not
+    expected to produce anything here at all."""
+    tokens = [(m.group(), m.start(), m.end()) for m in _TOKEN_RE.finditer(line)]
+    candidates = []
+    n = len(tokens)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and line[tokens[j][2]:tokens[j + 1][1]] == " ":
+            j += 1
+        if j > i:  # a run of 2+ tokens joined by exactly single spaces
+            for start in range(i, j + 1):
+                for end in range(start + 2, j + 2):
+                    candidates.append("".join(tok for tok, _s, _e in tokens[start:end]))
+        i = j + 1
+    return candidates
+
+
 def _iban_candidates(text):
-    return [tok for tok in _TOKEN_RE.findall(text) if _IBAN_SHAPE_RE.match(tok)]
+    """Every IBAN-shaped token in `text` -- the plain unspaced tokens
+    `_TOKEN_RE` finds, plus (`_spaced_iban_candidates`) the ISO 13616
+    printed form, grouped in fours or however else a bank happens to
+    print it, compacted -- scanned one line at a time so nothing is ever
+    joined across a newline. Order is not significant: every caller either
+    deduplicates (`lift_iban`) or only checks membership."""
+    candidates = []
+    for line in text.splitlines():
+        candidates += [tok for tok in _TOKEN_RE.findall(line) if _IBAN_SHAPE_RE.match(tok)]
+        candidates += [cand for cand in _spaced_iban_candidates(line)
+                       if _IBAN_SHAPE_RE.match(cand)]
+    return candidates
 
 
 def lift_iban(location, extracted, *, valid_iban):
@@ -238,13 +316,28 @@ def lift_iban(location, extracted, *, valid_iban):
     `invoice_from_output` injects it, so a caller can test the checksum
     branch with a fake).
 
-    Exactly one checksum-passing candidate resolves, lifted verbatim -- the
-    literal characters `_TOKEN_RE` found in the source text, never
-    re-cased or reformatted. Zero, or more than one, is an exception naming
-    what was found: **ambiguity is never a guess between candidates.** Two
-    identical tokens (the same IBAN printed twice) count once, not twice --
-    that is the same answer stated twice over, not two different answers to
-    choose between."""
+    Exactly one checksum-passing candidate resolves. The literal returned
+    is always made only of characters `_TOKEN_RE` found in the source text,
+    in the order they appeared there -- never re-cased, never a digit
+    retyped or guessed. **That includes removing the spaces from the ISO
+    13616 *printed* form real invoices actually use** ("IE29 AIBK 9311
+    5212 3456 78"): this is not the "re-cased or reformatted" this module
+    otherwise refuses to do, because the *electronic* form -- the one ISO
+    13616 itself defines, and the one a pain.001 `IBAN` element requires,
+    rejecting anything else -- carries no separators at all. The grouped,
+    spaced form is only ever how the same value is printed for a human to
+    read; the compacted string is not a reconstruction of the IBAN, it
+    *is* the IBAN. Compacting is lossless -- every character the source
+    printed survives, in order, nothing added, guessed, or dropped, never
+    joined across a line break -- and a model still never sees or supplies
+    a single one of these digits either way.
+
+    Zero, or more than one, checksum-passing candidate is an exception
+    naming what was found: **ambiguity is never a guess between
+    candidates.** Two identical tokens -- the same IBAN printed twice, or
+    the same IBAN found once compacted from spaced groups and once already
+    unspaced -- count once, not twice: that is the same answer stated
+    twice over, not two different answers to choose between."""
     text, warnings = find_located_block(location, extracted)
     if not text:
         return "", warnings

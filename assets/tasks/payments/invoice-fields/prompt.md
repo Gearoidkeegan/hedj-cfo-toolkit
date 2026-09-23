@@ -108,3 +108,11 @@ an empty `value` and an empty `quote` — never filled in with a guess.
 Both locations may be `""`. An invoice with neither an IBAN nor an account
 number you can point to is a real, reportable outcome — not a reason to
 invent one.
+
+16. `bill_to` — who this invoice is actually addressed to: the customer's own
+    name, as printed on a "Bill to:", "Invoice to:", "Customer:" line or
+    similar, not the supplier's own letterhead name at the top of the page.
+    This is an ordinary field like `supplier_name` — report it only when the
+    invoice's own text states it, with that exact wording as its `quote`.
+    Leave it blank when no such line is printed; do not infer it from the
+    supplier's own name or from anywhere else on the page.

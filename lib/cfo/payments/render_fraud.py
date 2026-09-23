@@ -56,6 +56,7 @@ from cfo.io import locked, read_json
 from cfo.payments.fraud import FLAG_EXCEPTION_MESSAGE_RE as _FLAG_EXCEPTION_MESSAGE_RE
 from cfo.payments.fraud import SEVERITIES
 from cfo.payments.signoff import STATE_FILENAME as _SIGNOFF_STATE_FILENAME
+from cfo.payments.signoff import prepared_by_label
 from cfo.tasks.schema_check import validate
 
 REQUIRED_META = ("title", "company", "date", "classification")
@@ -420,7 +421,13 @@ def _control_block_lines(control_block):
     to"."""
     lines = ["# Control", "",
              f"**Run:** {_cell(control_block.get('run_id', '') or 'not recorded')}", ""]
-    lines += [f"**Prepared by:** {_cell(control_block.get('prepared_by', '') or 'not recorded')} "
+    # F1 (Summary sheet review, 2026-09-23), small item: `prepared_by_label`
+    # annotates the raw account name (`getpass.getuser()`, an operational
+    # detail -- see `cfo.payments.signoff`'s own module docstring) so it
+    # never reads as a person, directly above "Reviewed by" a few lines
+    # below.
+    lines += [f"**Prepared by:** "
+             f"{_cell(prepared_by_label(control_block.get('prepared_by', '')) or 'not recorded')} "
              f"at {_cell(control_block.get('prepared_at', '') or 'not recorded')}", ""]
 
     reviewed_by = str(control_block.get("reviewed_by") or "").strip()

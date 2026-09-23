@@ -2,7 +2,7 @@
   "type": "object",
   "required": ["supplier_name", "invoice_number", "invoice_date", "due_date", "net", "vat",
                "gross", "currency", "payment_reference", "cost_category", "contact_email",
-               "bic", "vat_number", "iban_location", "account_number_location"],
+               "bic", "vat_number", "bill_to", "iban_location", "account_number_location"],
   "additionalProperties": false,
   "properties": {
     "supplier_name": {
@@ -96,6 +96,13 @@
       "type": "object", "additionalProperties": false, "required": ["value", "quote"],
       "properties": {
         "value": {"type": "string", "maxLength": 32},
+        "quote": {"type": "string", "maxLength": 400}
+      }
+    },
+    "bill_to": {
+      "type": "object", "additionalProperties": false, "required": ["value", "quote"],
+      "properties": {
+        "value": {"type": "string", "maxLength": 200},
         "quote": {"type": "string", "maxLength": 400}
       }
     },

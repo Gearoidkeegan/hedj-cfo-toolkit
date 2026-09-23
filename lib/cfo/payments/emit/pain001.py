@@ -147,6 +147,15 @@ def emit(batch, *, msg_id=None, created_at=None, initiating_party_name="",
         else:
             _sub(_sub(cdtr_acct_id, "Othr"), "Id", payment.account_number)
 
-        _sub(_sub(tx, "RmtInf"), "Ustrd", payment.reference)
+        # `remittance` -- the free-text a supplier reads on their bank
+        # statement -- falls back to `reference` when blank, but the two are
+        # distinct fields now (task-3-brief.md's ruling): `EndToEndId` above
+        # is `payment.reference` alone, untouched, because that is the join
+        # key `exception-meta.json`, `dropped_refs` and the instructed-lines
+        # digest all rely on. A `--remittance` amendment must never be able
+        # to change what EndToEndId says, or it silently breaks the link
+        # that stops a rejected/excluded payment being paid -- the same
+        # defect (a rejected payment going out anyway) in a new costume.
+        _sub(_sub(tx, "RmtInf"), "Ustrd", payment.remittance or payment.reference)
 
     return ET.tostring(document, encoding="utf-8", xml_declaration=True)

@@ -37,6 +37,100 @@ def _install_pdf():
     return ("python" if sys.platform == "win32" else "python3") + " -m pip install pymupdf"
 
 
+# D6 (2026-09-22, .superpowers/sdd/2026-09-22-payments-staged-output/
+# defect-d6-brief.md): PyMuPDF's own block/line grouping in
+# `page.get_text("dict")` is *column* order for a table -- every cell (or
+# column) of a table is its own block, so reading blocks in the order
+# PyMuPDF hands them back reads a whole label column, then a whole value
+# column, with no guarantee the two even stay adjacent (a real invoice's own
+# block order is closer to its content-stream order than either row- or
+# column-major reading order). A label and the value beside it can end up
+# many blocks apart, or in the wrong relative order altogether -- see the
+# brief for a real reproduction. The fix below ignores PyMuPDF's block/line
+# grouping for visible text entirely and instead reconstructs *visual rows*
+# from `page.get_text("words")`, which already carries each word's own
+# `(x0, y0, x1, y1)` -- grouping by y-centre and sorting by x within a row is
+# what a human reading the page actually does, and is what reunites a label
+# with its value regardless of which block either one happened to land in.
+#
+# Row tolerance is derived from each *word's own* height rather than a fixed
+# point value or a page-wide average: a superscript, subscript or a raised
+# table cell is meaningfully smaller than the running text around it, so
+# sizing the tolerance off the word's own glyph height keeps it out of a
+# neighbouring row it only half-overlaps, without needing a document-wide
+# guess at "the" font size (real invoices mix sizes -- a heading, a table,
+# a footer -- on one page).
+_ROW_TOL_FACTOR = 0.3   # fraction of a word's own height it may drift in y and still be "this row"
+_ROW_TOL_MIN = 0.75     # points -- a floor so a very small glyph doesn't get a near-zero tolerance
+
+# A word-to-word gap within a row bigger than this multiple of the row's own
+# (taller) word height is treated as a column gutter rather than ordinary
+# inter-word spacing: two words on the same typed line sit a few points
+# apart (a fraction of the line height), while a table's column gap or a
+# multi-column page's gutter is several line-heights wide. Preserving that
+# gap as several literal spaces -- rather than collapsing it to one, which
+# would read as a single sentence -- is the brief's own suggested fix for
+# "a two-column layout must not silently weld into one sentence"; it costs
+# nothing on a normal label/value pair, where `[ \t]+` in every downstream
+# regex (see cfo.payments.extract) already treats one space and several the
+# same way.
+_COLUMN_GAP_FACTOR = 2.5
+_COLUMN_GAP_SEPARATOR = "    "
+
+
+def _row_tolerance(height):
+    return max(height * _ROW_TOL_FACTOR, _ROW_TOL_MIN)
+
+
+def _word_hidden(word_rect, hidden_boxes):
+    """True when `word_rect`'s centre point falls inside any of
+    `hidden_boxes` -- the bounding boxes of spans this page's own
+    hidden-text pass (in `handle_pdf`) already decided were invisible,
+    near-transparent, tiny, off the page or coloured like their background.
+    A word is a subset of the span it came from, so its centre landing
+    inside that span's box is enough; this never re-runs the colour/alpha
+    checks, only reuses their result so hidden text -- already excluded from
+    `sink.hidden`'s point of view -- never reappears in the row-reconstructed
+    visible text either."""
+    cx, cy = (word_rect.x0 + word_rect.x1) / 2, (word_rect.y0 + word_rect.y1) / 2
+    return any(hb.contains(pymupdf.Point(cx, cy)) for hb in hidden_boxes)
+
+
+def _words_to_rows(words):
+    """`words` (PyMuPDF `page.get_text("words")` tuples, already filtered to
+    visible ones) grouped into visual rows by y-centre and, within each row,
+    sorted left to right -- see the module-level comment above this
+    function's constants for why. Returns each row's reconstructed text,
+    top to bottom.
+
+    Clustering is a single left-to-right pass over words already sorted by
+    y-centre: a new row starts whenever a word's y-centre is further from
+    the current row's own than either its own or the row's tolerance allows.
+    That is safe to run sequentially (rather than checking every row already
+    seen) only because the input is sorted by y first -- a row, once closed,
+    is never revisited."""
+    ordered = sorted(words, key=lambda w: ((w[1] + w[3]) / 2, w[0]))
+    rows = []
+    for x0, y0, x1, y1, text, *_rest in ordered:
+        yc = (y0 + y1) / 2
+        tol = _row_tolerance(y1 - y0)
+        if rows and abs(yc - rows[-1]["yc"]) <= max(tol, rows[-1]["tol"]):
+            rows[-1]["items"].append((x0, x1, text, y1 - y0))
+        else:
+            rows.append({"yc": yc, "tol": tol, "items": [(x0, x1, text, y1 - y0)]})
+    out = []
+    for row in rows:
+        items = sorted(row["items"], key=lambda it: it[0])
+        pieces = [items[0][2]]
+        for (px0, px1, _ptxt, pheight), (x0, x1, text, height) in zip(items, items[1:]):
+            gap = x0 - px1
+            threshold = max(pheight, height) * _COLUMN_GAP_FACTOR
+            pieces.append(_COLUMN_GAP_SEPARATOR if gap > threshold else " ")
+            pieces.append(text)
+        out.append("".join(pieces))
+    return out
+
+
 def handle_pdf(path, rel, sink):
     if pymupdf is None:
         raise MissingDependency(f"PDF support needs PyMuPDF: run {_install_pdf()}")
@@ -65,17 +159,23 @@ def handle_pdf(path, rel, sink):
                 image_area / max(abs(rect), 1) > 0.5
             pix = samples = None
             loc = f"page {page_no}"
-            emitted = 0
+            # Pass 1 (unchanged from before this fix): walk PyMuPDF's own
+            # block/line/span structure purely to find hidden text -- this
+            # is still the only path `sink.hidden` and the colour/alpha
+            # checks run through, exactly as before D6. What changes is
+            # what happens to the *visible* spans: instead of building each
+            # block's own text here (which is what used to make a table's
+            # column order the extracted reading order), this pass now only
+            # remembers where the hidden ones are, in `hidden_boxes`, so
+            # pass 2 can leave their words out of the row reconstruction.
+            hidden_boxes = []
             for block in data["blocks"]:
                 if block.get("type") != 0:
                     continue
-                lines = []
                 for line in block["lines"]:
-                    kept = []
                     for s in line["spans"]:
                         txt = s["text"]
                         if not txt.strip():
-                            kept.append(txt)
                             continue
                         box = pymupdf.Rect(s["bbox"])
                         alpha = s.get("alpha", 255) / 255
@@ -98,14 +198,24 @@ def handle_pdf(path, rel, sink):
                                     tech = "coloured like its background"
                         if tech:
                             sink.hidden(rel, loc, tech, txt)
-                        else:
-                            kept.append(txt)
-                    joined = "".join(kept).strip()
-                    if joined:
-                        lines.append(joined)
-                if lines:
-                    sink.block("paragraph", "\n".join(lines), {"page": page_no})
-                    emitted += 1
+                            hidden_boxes.append(box)
+            # Pass 2 (D6's fix): `page.get_text("words")` gives every word's
+            # own position, independent of which PyMuPDF block or line it
+            # was grouped into -- `_words_to_rows` uses that to read the
+            # page by visual row instead of by block, so a label and its
+            # value end up on the same output line even when they came from
+            # different blocks (see the module comment above). A word whose
+            # centre falls inside a box pass 1 already flagged hidden is
+            # left out here -- the same text pass 1 already excluded from
+            # the emitted block before this fix, just decided the same way
+            # (by span, not word) and applied at word granularity now.
+            words = [w for w in page.get_text("words")
+                     if w[4].strip() and not _word_hidden(pymupdf.Rect(w[:4]), hidden_boxes)]
+            rows = _words_to_rows(words)
+            emitted = 0
+            if rows:
+                sink.block("paragraph", "\n".join(rows), {"page": page_no})
+                emitted = 1
             if ocr_layer:
                 sink.scanned(page_no)
             if emitted == 0:

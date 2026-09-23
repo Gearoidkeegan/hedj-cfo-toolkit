@@ -247,6 +247,40 @@ class Flag:
     # without one (a test fixture, mostly); every Flag `check_batch` raises
     # here carries the invoice's own content_doc_id.
     content_doc_id: str = ""
+    # D7 (.superpowers/sdd/2026-09-22-payments-staged-output/defect-d-
+    # brief.md): every invoice THIS finding actually covers, in order,
+    # for a check that reasons across more than one invoice at once --
+    # `split_to_stay_under`, `near_duplicate_invoice`,
+    # `sequential_invoice_numbers`, and `lookalike_sender_domain`'s own
+    # batch-pair comparison (see that module's docstring, comparison 3).
+    # `()` for every ordinary single-invoice finding, where
+    # `content_doc_id` alone already says everything `cmd_review` needs.
+    #
+    # Before this, a `Flag` carried only one `content_doc_id` -- the
+    # *anchor* `where` prints -- no matter how many invoices its own
+    # `summary` named. `cmd_review` could then only ever record one
+    # `payment_reference` per exception, so rejecting a finding about N
+    # invoices dropped exactly one of them, and which one was an
+    # artefact of iteration order: a reviewer who named all three
+    # invoices and their total in their own rejection reason still saw
+    # most of the fraud get paid. See `content_doc_id`'s own docstring
+    # above for why `where` -- an invoice number, not a unique key -- was
+    # never the right thing to map back to a payment either.
+    content_doc_ids: tuple = ()
+
+    def __post_init__(self):
+        # Normalised to a tuple regardless of what a caller passed -- a
+        # JSON round-trip through `flags.json`/`exception-meta.json` (via
+        # `cfo.payments.cli`'s own `Flag(**row)`) hands this back as a
+        # list, never a tuple. And whenever a finding names more than an
+        # anchor, `content_doc_id` IS `content_doc_ids[0]`, never a second
+        # value a caller could set inconsistently with it: one
+        # representation, not two that can disagree (the brief's own
+        # words) -- enforced here, once, rather than trusted to every
+        # check that builds a multi-invoice Flag.
+        self.content_doc_ids = tuple(self.content_doc_ids)
+        if self.content_doc_ids:
+            self.content_doc_id = self.content_doc_ids[0]
 
 
 # The exact text `cfo.payments.cli.cmd_review` writes for a flag's own
@@ -791,6 +825,13 @@ def _check_lookalike_sender_domain(invoices, master):
                     continue
                 if not _is_domain_lookalike(domain_a, domain_b):
                     continue
+                # D7: this finding is about BOTH invoices -- the comparison
+                # only exists because two invoices in this batch claim the
+                # same supplier from different domains -- so both must be
+                # withheld if it is rejected, not only `second` (the
+                # anchor `where` already prints).
+                content_doc_ids = (str(second.get("content_doc_id") or ""),
+                                  str(first.get("content_doc_id") or ""))
                 flags.append(Flag(
                     check="lookalike_sender_domain", severity="high", where=_where(second),
                     summary=(f"{_where(second)} arrived from {domain_b!r}, which closely "
@@ -800,7 +841,7 @@ def _check_lookalike_sender_domain(invoices, master):
                     compared={"a": f"{_where(first)}: {domain_a}",
                              "b": f"{_where(second)}: {domain_b}"},
                     source=f"other invoices in this batch claiming {second.get('supplier')!r}",
-                    content_doc_id=str(second.get("content_doc_id") or "")))
+                    content_doc_id=content_doc_ids[0], content_doc_ids=content_doc_ids))
     return flags
 
 
@@ -893,13 +934,19 @@ def _check_sequential_invoice_numbers(invoices):
 
 def _sequential_flag(supplier, run):
     numbers = [str(invoice.get("number")) for _suffix, invoice in run]
+    # D7: every invoice in the tight run, not only the last one `where`
+    # prints -- the finding is about the whole run, and a reviewer who
+    # rejects it means to withhold every invoice in it.
+    anchor_invoice = run[-1][1]
+    content_doc_ids = tuple(str(invoice.get("content_doc_id") or "")
+                            for invoice in [anchor_invoice] + [inv for _suffix, inv in run[:-1]])
     return Flag(
-        check="sequential_invoice_numbers", severity="medium", where=_where(run[-1][1]),
+        check="sequential_invoice_numbers", severity="medium", where=_where(anchor_invoice),
         summary=(f"{len(run)} invoices from {supplier!r} in this batch carry numbers that "
                  f"run tightly together: {', '.join(numbers)}"),
         compared={"a": numbers[0], "b": numbers[-1]},
         source=f"invoice numbers for {supplier!r} in this batch",
-        content_doc_id=str(run[-1][1].get("content_doc_id") or ""))
+        content_doc_id=content_doc_ids[0], content_doc_ids=content_doc_ids)
 
 
 def _check_just_under_a_limit(invoices, matrix):
@@ -958,16 +1005,24 @@ def _check_split_to_stay_under(invoices, matrix):
                 continue
             if total > limit and all(amount <= limit for amount, _invoice in entries):
                 labels = ", ".join(_where(invoice) for _amount, invoice in entries)
+                # D7: this is the defect's own reproduction -- the finding
+                # is about the whole group, not only the last invoice
+                # `where` prints, so every invoice in it must be named,
+                # or rejecting the finding withholds only one of them.
+                anchor_invoice = entries[-1][1]
+                content_doc_ids = tuple(
+                    str(invoice.get("content_doc_id") or "")
+                    for invoice in [anchor_invoice] + [inv for _amount, inv in entries[:-1]])
                 flags.append(Flag(
                     check="split_to_stay_under", severity="high",
-                    where=_where(entries[-1][1]),
+                    where=_where(anchor_invoice),
                     summary=(f"{len(entries)} invoices from {supplier!r} on "
                              f"{invoice_date.isoformat()} total {total} {currency}, over the "
                              f"{role} limit of {limit} {currency}, though none alone reaches it"),
                     compared={"a": f"{total} {currency} across {labels}",
                              "b": f"{limit} {currency} ({role} limit)"},
                     source=f"approval matrix: {role} limit in {currency}",
-                    content_doc_id=str(entries[-1][1].get("content_doc_id") or "")))
+                    content_doc_id=content_doc_ids[0], content_doc_ids=content_doc_ids))
                 break  # one flag per group; every limit it clears would be noise
     return flags
 
@@ -1041,6 +1096,11 @@ def _check_near_duplicate_invoice(invoices):
             span = abs((date_a - date_b).days)
             if span > NEAR_DUPLICATE_WINDOW_DAYS:
                 continue
+            # D7: the finding is about the PAIR -- either invoice could be
+            # the genuine one and either could be the duplicate -- so both
+            # must be withheld if it is rejected, not only `second`.
+            content_doc_ids = (str(second.get("content_doc_id") or ""),
+                              str(first.get("content_doc_id") or ""))
             flags.append(Flag(
                 check="near_duplicate_invoice", severity="medium", where=_where(second),
                 summary=(f"{_where(second)} looks like a near-duplicate of {_where(first)}: "
@@ -1049,7 +1109,7 @@ def _check_near_duplicate_invoice(invoices):
                 compared={"a": f"{_where(first)}: {amount_a} on {date_a.isoformat()}",
                          "b": f"{_where(second)}: {amount_b} on {date_b.isoformat()}"},
                 source=f"invoice dates and gross amounts for {supplier_a!r}",
-                content_doc_id=str(second.get("content_doc_id") or "")))
+                content_doc_id=content_doc_ids[0], content_doc_ids=content_doc_ids))
     return flags
 
 

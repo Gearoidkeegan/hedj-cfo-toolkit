@@ -310,7 +310,7 @@ def add_payments_commands(groups):
     p.add_argument("--reference-prefix")
     p.set_defaults(func=_payments.dispatch, payments_command="start")
 
-    for name in ("extract-input", "collect", "check", "review", "judgement-input",
+    for name in ("extract-input", "collect", "check", "review", "draft", "judgement-input",
                 "judgement-collect"):
         p = sub.add_parser(name)
         p.add_argument("--run", required=True)
@@ -332,6 +332,28 @@ def add_payments_commands(groups):
                                                      "printed it")
     p.add_argument("--reason", required=True)
     p.set_defaults(func=_payments.dispatch, payments_command="mark-failed")
+
+    p = sub.add_parser("amend", help="exclude, restore or rewrite the remittance text of one "
+                                     "payment, before sign-off")
+    p.add_argument("--run", required=True)
+    p.add_argument("--reference", required=True)
+    p.add_argument("--exclude", action="store_true")
+    p.add_argument("--restore", action="store_true")
+    p.add_argument("--remittance")
+    p.add_argument("--value-date", help="YYYY-MM-DD -- may return a decision instead of "
+                                        "applying anything; see --resolve")
+    p.add_argument("--resolve", help="one of keep-in-batch/own-batch/hold-back -- only "
+                                     "meaningful together with --value-date")
+    # Defined flags that refuse (cli.py's own cmd_amend), not undefined
+    # flags argparse would reject with an "unrecognized arguments" error
+    # that teaches nobody anything -- see cmd_amend's own module comment.
+    p.add_argument("--beneficiary")
+    p.add_argument("--account")
+    p.add_argument("--iban")
+    p.add_argument("--amount")
+    p.add_argument("--reason", required=True)
+    p.add_argument("--by", required=True)
+    p.set_defaults(func=_payments.dispatch, payments_command="amend")
 
     p = sub.add_parser("disposition", help="record a decision against one exception")
     p.add_argument("--run", required=True)
@@ -356,10 +378,25 @@ def add_payments_commands(groups):
     p.add_argument("--home-currency")
     p.set_defaults(func=_payments.dispatch, payments_command="build")
 
+    p = sub.add_parser("final", help="stage 3: the tidied, signed-off payment file(s) -- "
+                                     "refused until the draft has been confirmed")
+    p.add_argument("--run", required=True)
+    p.add_argument("--outputs")
+    p.add_argument("--debtor-name")
+    p.add_argument("--debtor-bic")
+    p.add_argument("--initiating-party")
+    p.add_argument("--home-currency")
+    p.set_defaults(func=_payments.dispatch, payments_command="final")
+
     p = sub.add_parser("red-team", help="the adversarial review of the payment controls")
     p.add_argument("--run", required=True)
     p.add_argument("--controls")
     p.set_defaults(func=_payments.dispatch, payments_command="red-team")
+
+    p = sub.add_parser("register", help="extract-only mode: one CSV of what the invoices "
+                                        "say, no check/review/sign-off needed")
+    p.add_argument("--run", required=True)
+    p.set_defaults(func=_payments.dispatch, payments_command="register")
 
 
 def build_parser():
@@ -425,7 +462,11 @@ def main(argv=None):
         args = build_parser().parse_args(argv)
         result = args.func(args)
         warnings = result.pop("_warnings", []) if isinstance(result, dict) else []
-        print_problems([], warnings)
+        # D4 (2026-09-22 real run): a command's own money-relevant subset
+        # of `warnings` (see cfo.payments.cli.cmd_check), never truncated
+        # away regardless of how many ordinary warnings arrived first.
+        important = result.pop("_important", []) if isinstance(result, dict) else []
+        print_problems([], warnings, important=important)
         emit(result)
         return EXIT_OK
     except ToolkitError as exc:

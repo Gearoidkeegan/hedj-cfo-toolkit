@@ -138,6 +138,34 @@ def _normalise(name):
     return " ".join(tokens)
 
 
+def same_party(a, b):
+    """True when `a` and `b` name the same entity once case, punctuation
+    and a legal-suffix token are stripped -- the near-exact test `match`
+    already applies to a name against the supplier master (`_normalise`),
+    reused rather than reinvented (D2/D3, 2026-09-22 real run: comparing an
+    invoice's own bill-to party against the debtor name a run was started
+    with, and against its own `supplier_name`) so the two callers can never
+    quietly disagree about what "the same party" means.
+
+    Also ignores internal spacing, which `_normalise` alone does not:
+    "Booterstown United F.C." and "BOOTERSTOWN UNITED FC" normalise to
+    "booterstown united f c" and "booterstown united fc" respectively --
+    one space apart, because stripping "." leaves a gap `_normalise` never
+    closes -- and are still the same club, not two different spellings.
+    Comparing with spacing removed on top of `_normalise` closes exactly
+    that gap without touching `_normalise` itself or its own callers.
+
+    Blank on either side is never a match: there is nothing to compare a
+    blank name against, and a caller with nothing on one side has a
+    different, more honest finding to report (see `cfo.payments.cli`) than
+    a false "these agree"."""
+    left = _normalise(a).replace(" ", "")
+    right = _normalise(b).replace(" ", "")
+    if not left or not right:
+        return False
+    return left == right
+
+
 def _parse_aliases(raw):
     if isinstance(raw, (list, tuple)):
         return [str(a).strip() for a in raw if str(a).strip()]

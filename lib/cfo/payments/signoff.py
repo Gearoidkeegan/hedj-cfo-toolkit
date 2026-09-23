@@ -139,6 +139,30 @@ def _batches_summary(batches):
     return len(batches), payment_count, control_total
 
 
+# Defect F1 (Summary sheet review, 2026-09-23), small item: `prepared_by`
+# below is `getpass.getuser()` -- a best-effort operational detail, never
+# an authentication claim (see the module docstring). `control_block`
+# keeps handing that raw value out unchanged (every existing reader of
+# `block["prepared_by"]` must keep getting exactly that); it is the two
+# places a third party actually reads it -- the workbook's Sign-off
+# sheet, the fraud report -- that call `prepared_by_label` at render
+# time, so an operating-system account name is never printed as though
+# it were a person, directly above a real reviewer's real name.
+PREPARED_BY_QUALIFIER = "the operating-system account that ran this tool, not a person"
+
+
+def prepared_by_label(prepared_by):
+    """`prepared_by`, annotated with `PREPARED_BY_QUALIFIER` so a reader
+    can never mistake it for a person. Blank stays blank -- `start_review`
+    records "" when the platform can't report a username at all (its own
+    except branch below), and there is nothing to annotate around
+    nothing."""
+    prepared_by = str(prepared_by or "").strip()
+    if not prepared_by:
+        return ""
+    return f"{prepared_by} ({PREPARED_BY_QUALIFIER})"
+
+
 def start_review(run_dir, batches, exceptions):
     """Opens the review for this run: records the batch shape (payment
     count, control total, batch count) and the exceptions that need a human
@@ -255,6 +279,61 @@ def sign_off(run_dir, *, reviewed_by, at=None):
 
     new_state = _update(run_dir, _finish, must_exist=True)
     return dict(new_state["sign_off"])
+
+
+def restate(run_dir, batches, *, reason, by):
+    """Rewrites this run's own recorded batch shape -- batch count, payment
+    count and control total -- to match `batches`, and appends an audit
+    entry to `signoff.json` naming what changed and why.
+
+    Exists for exactly one reason (Task 4 of the payments: staged-output
+    milestone): `payments amend --value-date --resolve own-batch` changes
+    the *number* of batches, which makes `cli._assert_batches_match_
+    signoff`'s own guard start refusing every later build -- correctly,
+    since the run's recorded shape no longer matches what is actually on
+    disk. This is the one place that record is allowed to move.
+
+    **Refuses once this run is signed off.** Restating the recorded shape
+    after sign-off would let the record of what a reviewer actually
+    attested to be rewritten after the fact -- turning the attestation
+    into a lie. A `restate` that still worked post-sign-off would be a
+    worse defect than the batch-boundary bug this task exists to fix.
+
+    Called by `cmd_amend` (`payments amend --value-date --resolve
+    own-batch`) and by nothing else -- there is no other legitimate reason
+    for a run's reviewed shape to move once `start_review` has recorded
+    it.
+    """
+    reason_s = str(reason or "").strip()
+    if not reason_s:
+        raise ToolkitError(("reason", "a reason is required, and an empty or whitespace "
+                                      "string is not one"))
+    by_s = str(by or "").strip()
+    if not by_s:
+        raise ToolkitError(("by", "the name of the person restating this run's batch shape is "
+                                  "required"))
+    batch_count, payment_count, control_total = _batches_summary(batches)
+
+    def _restate(state):
+        if state.get("sign_off") is not None:
+            raise ToolkitError(("restate", "this run is already signed off -- restating the "
+                                "recorded batch shape now would let the record of what was "
+                                "actually signed off be rewritten after the fact"))
+        entry = {
+            "at": now_iso(), "reason": reason_s, "by": by_s,
+            "from": {"batch_count": state["batch_count"], "payment_count": state["payment_count"],
+                     "control_total": state["control_total"]},
+            "to": {"batch_count": batch_count, "payment_count": payment_count,
+                   "control_total": str(control_total)},
+        }
+        state["batch_count"] = batch_count
+        state["payment_count"] = payment_count
+        state["control_total"] = str(control_total)
+        state.setdefault("restatements", []).append(entry)
+        return state
+
+    new_state = _update(run_dir, _restate, must_exist=True)
+    return dict(new_state["restatements"][-1])
 
 
 def is_signed_off(run_dir):

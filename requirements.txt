@@ -1,3 +1,10 @@
 openpyxl==3.1.5
 python-docx==1.2.0
 python-pptx==1.0.2
+
+# HTTPS verification for the one outbound request (the ECB reference rate).
+# Optional -- cfo.market.rates falls back to certifi, then to the stock
+# context, and a failed fetch has always degraded to cache-and-warn. See
+# _ssl_context there for why the OS trust store is preferred over a bundle.
+truststore==0.10.4
+certifi==2026.7.22
