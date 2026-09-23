@@ -1,7 +1,7 @@
 {
   "name": "cfo-toolkit",
   "description": "Free treasury tools for CFOs and treasury managers: policy review, payments and fraud checks, debt advisory, key terms register and cash forecasting.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {"name": "Hedj Financial Services Ltd"},
   "license": "MIT",
   "keywords": ["treasury", "cfo", "fx", "cash-forecast", "payments", "debt"]
