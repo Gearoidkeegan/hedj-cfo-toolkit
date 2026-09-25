@@ -657,6 +657,18 @@ def _read_amount(invoice, field):
         return None
 
 
+def _collapse_value_date_warnings(warnings, execution_date, limit=3):
+    """One line per overdue invoice reads as noise once most of a run is
+    overdue (every sample invoice was), and pushes warnings that matter off
+    a truncated console. Past `limit`, say it once and name them all."""
+    if len(warnings) <= limit:
+        return warnings
+    names = ", ".join(where for where, _ in warnings)
+    return [("batch", f"{len(warnings)} invoices have a value date before this batch's execution "
+                      f"date {execution_date.isoformat()} and will be paid on the execution date: "
+                      f"{names}")]
+
+
 def _invoice_to_payment(invoice, master, reference_prefix, execution_date):
     """The `Payment` this invoice becomes, plus the `value_date` it
     actually carried before B2's clamp (or `None`, when nothing needed
@@ -1032,7 +1044,8 @@ def cmd_review(args):
     result = signoff.start_review(args.run, list(split), exceptions)
     return {"outstanding": result["exceptions"], "started": True,
             "batch_count": len(split), "payment_count": split.payment_count,
-            "control_total": str(split.control_total), "_warnings": value_date_warnings}
+            "control_total": str(split.control_total),
+            "_warnings": _collapse_value_date_warnings(value_date_warnings, execution_date)}
 
 
 def _majority_currency(payments):

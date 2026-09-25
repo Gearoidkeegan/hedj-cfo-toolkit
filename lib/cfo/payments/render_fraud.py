@@ -339,7 +339,9 @@ def _group_block(flags_in_group, judgements_by_key, dispositions_by_key=None, le
     worst = min(SEVERITIES.index(flag.severity) for flag in flags_in_group)
     severity = SEVERITIES[worst]
     checks = _english_list(sorted({_check_label(flag.check) for flag in flags_in_group}))
-    heading = f"{checks}{DASH}{severity.title()}{DASH}one story across {len(flags_in_group)} findings"
+    heading = f"{checks}{DASH}{severity.title()}"
+    if len(flags_in_group) > 1:
+        heading += f"{DASH}one story across {len(flags_in_group)} findings"
     lines = [f"{'#' * level} {_cell(heading)}", ""]
 
     notes = []

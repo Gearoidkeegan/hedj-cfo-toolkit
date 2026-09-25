@@ -1,6 +1,6 @@
 {
   "id": "policy-review.review-lender",
-  "version": 1,
+  "version": 2,
   "tier": "sonnet",
   "depths": ["quick", "full"],
   "group": "panel",

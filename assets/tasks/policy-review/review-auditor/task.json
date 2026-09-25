@@ -1,6 +1,6 @@
 {
   "id": "policy-review.review-auditor",
-  "version": 1,
+  "version": 2,
   "tier": "sonnet",
   "depths": ["full"],
   "group": "panel",

@@ -83,9 +83,11 @@ apply.
 
 Try it on the sample company in `samples/policy-review/`.
 
-**What it costs:** measured figures for a basic and a detailed review will be given here once
-they have been measured on a real run (pending the acceptance run). It runs in your own Claude
-account, so it draws on your plan's allowance, or on API prices if you use a key.
+**What it costs:** measured on a real run against the sample company, a detailed review (lender,
+auditor and non-executive panel plus a final critic) cost about **$0.39** in model calls; the
+critic was over half of that. A basic review, which skips all but the lender, came to about
+**$0.09** on the same run's per-task figures. It runs in your own Claude account, so it draws on
+your plan's allowance, or on API prices if you use a key.
 
 The toolkit runs in your own Claude account. Your documents are not sent to Hedj.
 

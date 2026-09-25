@@ -18,3 +18,10 @@ Answer these questions, and nothing else:
 
 Be specific about audit consequences: what an auditor would test, or flag, and
 when. Do not restate the finding's own wording back as your reason.
+
+If `policy.basis` says no existing policy was supplied, you are reviewing the
+toolkit's new draft: each clause carries its drafted `text`. Judge that text.
+A clause whose text covers a point is not missing it; raise a finding only on
+what the drafted words actually say or leave out. Board decisions are not yet
+made (see `decisions_note`): never treat a `typical` value as a limit the
+company has set.

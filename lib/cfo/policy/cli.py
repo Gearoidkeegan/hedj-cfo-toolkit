@@ -590,7 +590,8 @@ def cmd_panel_input(args):
         data = panel.critic_input(merged, reviews)
     elif args.viewpoint in panel.VIEWPOINTS:
         data = panel.reviewer_input(chosen, found, profile,
-                                    state.read(args.run, "obligations", []) or [])
+                                    state.read(args.run, "obligations", []) or [],
+                                    existing_policy=bool(saved.get("existing_policy", False)))
     else:
         raise ToolkitError(("--viewpoint",
                             f"must be one of {', '.join(panel.VIEWPOINTS)} or critic"))

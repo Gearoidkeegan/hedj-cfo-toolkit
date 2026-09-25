@@ -104,12 +104,32 @@ def _obligation_summary(obligations, found=()):
     return out
 
 
-def reviewer_input(selection, found, profile, obligations):
+DECISIONS_NOTE = ("Every decision below is the board's to make and none has been made: "
+                  "`typical` is what companies of this size commonly choose, shown for "
+                  "reference only. It is not a limit this company has set.")
+
+
+def reviewer_input(selection, found, profile, obligations, existing_policy=True):
+    """What a reviewer sees. With an existing policy the findings describe
+    its gaps, so the clause list is enough. Without one (`existing_policy`
+    False) the redraft is the only policy there is, and each clause carries
+    its drafted text -- otherwise reviewers see titles only and raise
+    "the policy does not state X" about clauses the draft contains."""
     company = for_task(profile).get("company", {})
+    if existing_policy:
+        clauses = [{"id": c.id, "title": c.title, "section": c.section}
+                   for c in selection.selected]
+    else:
+        from cfo.policy.render_policy import drafted_clauses
+        clauses = drafted_clauses(selection)
     return {"company": company,
             "policy": {"scope": selection.scope, "tier": selection.tier,
-                       "size_band": selection.size_band},
-            "clauses": [{"id": c.id, "title": c.title, "section": c.section} for c in selection.selected],
+                       "size_band": selection.size_band,
+                       "basis": ("the company's existing policy" if existing_policy else
+                                 "no existing policy was supplied: the clauses below are the "
+                                 "toolkit's new draft, and their text is what you are reviewing")},
+            "clauses": clauses,
+            "decisions_note": DECISIONS_NOTE,
             "decisions": selection.decisions,
             "findings": [_finding_row(f) for f in found],
             "obligations": _obligation_summary(obligations, found)}
@@ -188,7 +208,7 @@ def merge_reviews(found, reviews, selection):
                     seen.append(viewpoint)
                 existing.viewpoint = ", ".join(seen)
                 continue
-            detail = addition.get("detail", "")
+            detail = addition.get("detail") or ""   # null is "nothing to add"
             out.append(findings_module.Finding(
                 id="reviewer:{viewpoint}:{clause_id}:{len_out}".format(
                     viewpoint=viewpoint, clause_id=clause_id, len_out=len(out)),

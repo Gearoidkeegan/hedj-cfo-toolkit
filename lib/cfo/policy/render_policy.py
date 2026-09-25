@@ -154,6 +154,22 @@ def _regulatory_jurisdiction_note(country):
            "policy assumes.")
 
 
+def drafted_clauses(selection):
+    """Every selected clause as the redraft words it -- id, title, section
+    and the rendered text, board decisions marked as undecided with their
+    typical value. For the review panel on a run with no existing policy:
+    the draft is the only policy there is, so a reviewer shown only clause
+    titles reports "the policy does not state X" about clauses that do."""
+    decisions_by_clause = {}
+    for decision in selection.decisions:
+        decisions_by_clause.setdefault(decision["clause_id"], []).append(decision)
+    warnings = []
+    return [{"id": clause.id, "title": clause.title, "section": clause.section,
+             "text": _clause_body(clause, selection.tier, selection.scope,
+                                  decisions_by_clause, warnings)}
+            for section in selection.sections for clause in section["clauses"]]
+
+
 def policy_markdown(selection, meta, warnings=None):
     """The full policy, front matter to the last clause, ready for
     `build_docx(..., template="policy")`.
